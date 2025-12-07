@@ -1,0 +1,8 @@
+[package]
+name = "astro-parrot"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+common-game = { git = "ssh://git@github.com:22/unitn-ap-2025/common.git" }
+
