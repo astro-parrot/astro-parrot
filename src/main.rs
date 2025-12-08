@@ -17,6 +17,6 @@ fn get_test_channels() -> (PlanetOrchHalfChannels, PlanetExplHalfChannels) {
 
 fn main() {
     let (orch_ch, expl_ch) = get_test_channels();
-    let _planet = astro_parrot::create_planet(orch_ch.0, orch_ch.1, expl_ch.0);
+    let _planet = astro_parrot::create_planet(orch_ch.0, orch_ch.1, expl_ch.0, 1);
     println!("Planet created successfully");
 }

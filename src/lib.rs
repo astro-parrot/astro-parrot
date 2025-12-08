@@ -60,18 +60,18 @@ pub fn create_planet(
     rx_orchestrator: Receiver<messages::OrchestratorToPlanet>,
     tx_orchestrator: Sender<messages::PlanetToOrchestrator>,
     rx_explorer: Receiver<messages::ExplorerToPlanet>,
+    planet_id: u32,
 ) -> Planet {
     use BasicResourceType::Carbon;
     use ComplexResourceType::{AIPartner, Diamond};
 
-    let id = 1;
     let ai = AstroParrot { active: false };
     let gen_rules = vec![Carbon];
     let comb_rules = vec![AIPartner, Diamond];
 
     // Construct the planet and return it
     Planet::new(
-        id,
+        planet_id,
         PlanetType::C,
         Box::new(ai),
         gen_rules,
