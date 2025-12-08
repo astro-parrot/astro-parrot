@@ -3,13 +3,14 @@ mod helpers;
 mod orchestrator;
 
 use common_game::components::{
-    planet::{PlanetAI, PlanetState},
-    resource::{Combinator, Generator},
+    planet::{Planet, PlanetAI, PlanetState, PlanetType},
+    resource::{Combinator, ComplexResourceType, Generator, BasicResourceType},
     rocket::Rocket,
 };
 use common_game::protocols::messages::{
-    ExplorerToPlanet, OrchestratorToPlanet, PlanetToExplorer, PlanetToOrchestrator,
+    self, ExplorerToPlanet, OrchestratorToPlanet, PlanetToExplorer, PlanetToOrchestrator,
 };
+use crossbeam_channel::{Receiver, Sender};
 
 pub struct AstroParrot {
     pub active: bool,
@@ -53,4 +54,30 @@ impl PlanetAI for AstroParrot {
     fn stop(&mut self, _state: &PlanetState) {
         self.active = false;
     }
+}
+
+pub fn create_planet(
+    rx_orchestrator: Receiver<messages::OrchestratorToPlanet>,
+    tx_orchestrator: Sender<messages::PlanetToOrchestrator>,
+    rx_explorer: Receiver<messages::ExplorerToPlanet>,
+) -> Planet {
+    use ComplexResourceType::{AIPartner, Diamond};
+    use BasicResourceType::Carbon;
+
+    let id = 1;
+    let ai = AstroParrot { active: false };
+    let gen_rules = vec![Carbon];
+    let comb_rules = vec![AIPartner, Diamond];
+
+    // Construct the planet and return it
+    Planet::new(
+        id,
+        PlanetType::C,
+        Box::new(ai),
+        gen_rules,
+        comb_rules,
+        (rx_orchestrator, tx_orchestrator),
+        rx_explorer,
+    )
+    .unwrap()
 }
