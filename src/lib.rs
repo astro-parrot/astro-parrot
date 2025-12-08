@@ -4,7 +4,7 @@ mod orchestrator;
 
 use common_game::components::{
     planet::{Planet, PlanetAI, PlanetState, PlanetType},
-    resource::{Combinator, ComplexResourceType, Generator, BasicResourceType},
+    resource::{BasicResourceType, Combinator, ComplexResourceType, Generator},
     rocket::Rocket,
 };
 use common_game::protocols::messages::{
@@ -24,7 +24,7 @@ impl PlanetAI for AstroParrot {
         combinator: &Combinator,
         msg: OrchestratorToPlanet,
     ) -> Option<PlanetToOrchestrator> {
-        orchestrator::handle(self, state, generator, combinator, msg)
+        orchestrator::handle(state, generator, combinator, msg)
     }
 
     fn handle_asteroid(
@@ -61,8 +61,8 @@ pub fn create_planet(
     tx_orchestrator: Sender<messages::PlanetToOrchestrator>,
     rx_explorer: Receiver<messages::ExplorerToPlanet>,
 ) -> Planet {
-    use ComplexResourceType::{AIPartner, Diamond};
     use BasicResourceType::Carbon;
+    use ComplexResourceType::{AIPartner, Diamond};
 
     let id = 1;
     let ai = AstroParrot { active: false };

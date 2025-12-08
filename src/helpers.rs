@@ -8,14 +8,21 @@ use common_game::components::{
 };
 
 macro_rules! simple_comb {
-    ($resource:expr, $gen:expr, $cell:expr, { $($variant:ident,)* }) => {
+    ($resource:expr, $gen:expr, $cell:expr,
+        supported { $($ok:ident),* $(,)? },
+        unsupported { $($no:ident),* $(,)? }) => {
         match $resource {
             $(
-                $variant => {
+                $ok => {
                     paste::paste! {
-                        $gen.[<make_ $variant:lower>]($cell)
-                            .map(BasicResource::$variant)
+                        $gen.[<make_ $ok:lower>]($cell)
+                            .map(BasicResource::$ok)
                     }
+                },
+            )*
+            $(
+                $no => {
+                    Err(format!("Generator does not support generating {:?}", $no))
                 },
             )*
         }
@@ -23,15 +30,27 @@ macro_rules! simple_comb {
 }
 
 macro_rules! complex_comb {
-    ($req:expr, $comb:expr, $cell:expr, { $($variant:ident,)* }) => {
+    ($req:expr, $comb:expr, $cell:expr,
+        supported { $($ok:ident),* $(,)? },
+        unsupported { $($no:ident),* $(,)? }
+    ) => {
         match $req {
             $(
-                $variant(a, b) => {
+                $ok(a, b) => {
                     paste::paste! {
-                        $comb.[<make_ $variant:lower>](a, b, $cell)
+                        $comb.[<make_ $ok:lower>](a, b, $cell)
                             .map(|v| v.to_complex())
                             .map_err(|(e, a, b)| (e, a.to_generic(), b.to_generic()))
                     }
+                },
+            )*
+            $(
+                $no(a, b) => {
+                    Err((
+                        format!("unsupported recipe: {}", stringify!($no)),
+                        a.to_generic(),
+                        b.to_generic(),
+                    ))
                 },
             )*
         }
@@ -55,11 +74,11 @@ pub fn generate_basic(
         resource,
         generator,
         cell,
-        {
+        supported { Carbon },
+        unsupported {
             Hydrogen,
             Oxygen,
             Silicon,
-            Carbon,
         }
     )
     .ok()
@@ -76,10 +95,9 @@ pub fn combine_complex(
         req,
         combinator,
         cell,
-        {
+        supported { AIPartner, Diamond },
+        unsupported {
             Water,
-            AIPartner,
-            Diamond,
             Dolphin,
             Life,
             Robot,
