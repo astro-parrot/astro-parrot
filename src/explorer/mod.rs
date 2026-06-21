@@ -1,6 +1,7 @@
 //! Explorer abstraction.
 
 mod mock_explorer;
+mod ai_explorer;
 
 use std::collections::HashMap;
 
@@ -11,6 +12,7 @@ use common_game::utils::ID;
 use crossbeam_channel::{Receiver, Sender};
 
 pub use mock_explorer::MockExplorer;
+pub use ai_explorer::AiExplorer;
 
 /// The contents of an explorer's bag, reported back to the orchestrator/GUI.
 #[derive(Debug, Clone, Default)]

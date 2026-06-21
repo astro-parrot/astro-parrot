@@ -151,7 +151,7 @@ struct Game {
     asteroid_timer: f32,
     sunray_timer: f32,
     state_timer: f32,
-    mine_timer: f32,
+    move_timer: f32,
 
     last_event: String,
 }
@@ -198,7 +198,7 @@ impl Game {
             asteroid_timer: 2.6,
             sunray_timer: 0.5,
             state_timer: 0.2,
-            mine_timer: 1.5,
+            move_timer: 6.0,
             last_event: "Click empty space to add a planet, a planet to send the explorer."
                 .to_string(),
         }
@@ -225,6 +225,7 @@ impl Game {
                 match self.orch.command(Command::MoveExplorer { explorer: self.explorer_id, dst: pid }) {
                     Ok(()) => {
                         self.explorer_dest = Some(pid);
+                        self.move_timer = 6.0; // reset auto-move so it doesn't fire right after
                         self.last_event = format!("Explorer heading to planet #{pid}.");
                     }
                     Err(e) => self.last_event = e,
@@ -274,6 +275,8 @@ impl Game {
                 pv.has_rocket = state.has_rocket;
             }
         }
+        // Poll explorer bags so the HUD reflects autonomous mining.
+        self.orch.poll_bags();
     }
 
     fn tick_spawners(&mut self, dt: f32) {
@@ -287,6 +290,17 @@ impl Game {
             self.spawn_asteroid();
             self.asteroid_interval = (self.asteroid_interval - 0.05).max(0.9);
             self.asteroid_timer = self.asteroid_interval;
+        }
+        self.move_timer -= dt;
+        if self.move_timer <= 0.0 {
+            self.move_timer = 6.0;
+            // Only move if the explorer is not already traveling.
+            if self.explorer_dest.is_none() {
+                match self.orch.auto_move_explorer(self.explorer_id) {
+                    Ok(()) => {}
+                    Err(e) => self.last_event = e,
+                }
+            }
         }
     }
 
@@ -394,14 +408,9 @@ impl Game {
                 self.explorer_dest = None;
             }
         } else {
-            // Docked: orbit the planet and mine.
+            // Docked: orbit the planet. Mining is driven by the AI explorer.
             let t = get_time() as f32;
             self.explorer_pos = dest_pos + vec2((t * 1.2).cos(), (t * 1.2).sin()) * (PLANET_RADIUS + 22.0);
-            self.mine_timer -= dt;
-            if self.mine_timer <= 0.0 {
-                self.mine();
-                self.mine_timer = 1.5;
-            }
         }
     }
 
@@ -470,17 +479,6 @@ impl Game {
                 self.last_event = format!("Planet #{id} placed.");
             }
             Err(e) => self.last_event = e,
-        }
-    }
-
-    fn mine(&mut self) {
-        let command = if self.explorer_carbon() < 2 {
-            Command::GenerateBasic { explorer: self.explorer_id, resource: BasicResourceType::Carbon }
-        } else {
-            Command::GenerateComplex { explorer: self.explorer_id, resource: ComplexResourceType::Diamond }
-        };
-        if let Err(e) = self.orch.command(command) {
-            self.last_event = e;
         }
     }
 

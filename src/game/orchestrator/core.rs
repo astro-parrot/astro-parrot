@@ -3,10 +3,10 @@
 use std::collections::HashMap;
 use std::thread::{self, JoinHandle};
 
-use astro_parrot::{MockExplorer, BagContent, Explorer, create_planet};
+use astro_parrot::{AiExplorer, BagContent, Explorer, create_planet};
 use common_game::components::asteroid::Asteroid;
 use common_game::components::planet::DummyPlanetState;
-use common_game::components::resource::{BasicResourceType, ComplexResourceType, ResourceType};
+use common_game::components::resource::ResourceType;
 use common_game::components::sunray::Sunray;
 use common_game::protocols::orchestrator_explorer::{
     ExplorerToOrchestrator, ExplorerToOrchestratorKind, OrchestratorToExplorer,
@@ -38,8 +38,6 @@ struct ExplorerHandle {
 pub enum Command {
     SendSunray { planet: ID },
     SendAsteroid { planet: ID },
-    GenerateBasic { explorer: ID, resource: BasicResourceType },
-    GenerateComplex { explorer: ID, resource: ComplexResourceType },
     MoveExplorer { explorer: ID, dst: ID },
 }
 
@@ -119,7 +117,7 @@ impl Orchestrator {
         let (p2e_tx, p2e_rx) = unbounded::<PlanetToExplorer>();
         let first_planet_tx = self.planets[&planet].tx_explorer.clone();
 
-        let mut explorer = MockExplorer::new(
+        let mut explorer = AiExplorer::new(
             id,
             planet,
             o2e_rx,
@@ -149,12 +147,6 @@ impl Orchestrator {
         match command {
             Command::SendSunray { planet } => self.send_sunray(planet),
             Command::SendAsteroid { planet } => self.send_asteroid(planet).map(|_| ()),
-            Command::GenerateBasic { explorer, resource } => {
-                self.generate_basic(explorer, resource).map(|_| ())
-            }
-            Command::GenerateComplex { explorer, resource } => {
-                self.generate_complex(explorer, resource).map(|_| ())
-            }
             Command::MoveExplorer { explorer, dst } => self.move_explorer(explorer, dst),
         }
     }
@@ -191,63 +183,25 @@ impl Orchestrator {
         }
     }
 
-    /// Asks an explorer to generate a basic resource; returns success.
-    pub fn generate_basic(&mut self, explorer: ID, resource: BasicResourceType) -> Result<bool, String> {
-        let ok = self
-            .explorer_comm
-            .req_ack(
-                explorer,
-                OrchestratorToExplorer::GenerateResourceRequest { to_generate: resource },
-                ExplorerToOrchestratorKind::GenerateResourceResponse,
-            )?
-            .into_generate_resource_response()
-            .unwrap() // safe checked above
-            .1
-            .is_ok();
+    /// Moves the explorer to the next planet it hasn't just come from (round-robin).
+    pub fn auto_move_explorer(&mut self, explorer: ID) -> Result<(), String> {
+        let current = self
+            .explorers
+            .get(&explorer)
+            .ok_or_else(|| format!("explorer {explorer} does not exist"))?
+            .current_planet;
 
-        if ok {
-            *self
-                .bags
-                .entry(explorer)
-                .or_default()
-                .content
-                .entry(ResourceType::Basic(resource))
-                .or_default() += 1;
-            self.events.push(GuiEvent::BasicGenerated { explorer, resource });
+        // Pick any alive planet that is not the current one.
+        let dst = self
+            .galaxy
+            .planets()
+            .into_iter()
+            .find(|&p| p != current);
+
+        match dst {
+            Some(p) => self.move_explorer(explorer, p),
+            None => Ok(()), // only one planet, nowhere to go
         }
-        Ok(ok)
-    }
-
-    /// Asks an explorer to craft a complex resource; returns success.
-    pub fn generate_complex(
-        &mut self,
-        explorer: ID,
-        resource: ComplexResourceType,
-    ) -> Result<bool, String> {
-        let ok = self
-            .explorer_comm
-            .req_ack(
-                explorer,
-                OrchestratorToExplorer::CombineResourceRequest { to_generate: resource },
-                ExplorerToOrchestratorKind::CombineResourceResponse,
-            )?
-            .into_combine_resource_response()
-            .unwrap() // safe checked above
-            .1
-            .is_ok();
-
-        if ok {
-            let bag = self.bags.entry(explorer).or_default();
-            *bag.content.entry(ResourceType::Complex(resource)).or_default() += 1;
-            // Diamond consumes two Carbon.
-            if resource == ComplexResourceType::Diamond
-                && let Some(c) = bag.content.get_mut(&ResourceType::Basic(BasicResourceType::Carbon))
-            {
-                *c = c.saturating_sub(2);
-            }
-            self.events.push(GuiEvent::ComplexGenerated { explorer, resource });
-        }
-        Ok(ok)
     }
 
     /// Moves an explorer to a connected planet.
@@ -311,6 +265,44 @@ impl Orchestrator {
     #[must_use]
     pub fn bag(&self, explorer: ID) -> Option<&BagContent> {
         self.bags.get(&explorer)
+    }
+
+    /// Polls every living explorer for its current bag and emits GUI events for
+    /// any resources that appeared since the last poll.
+    pub fn poll_bags(&mut self) {
+        let explorer_ids: Vec<ID> = self.explorers.keys().copied().collect();
+        for id in explorer_ids {
+            let Ok(msg) = self.explorer_comm.req_ack(
+                id,
+                OrchestratorToExplorer::BagContentRequest,
+                ExplorerToOrchestratorKind::BagContentResponse,
+            ) else {
+                continue;
+            };
+            let ExplorerToOrchestrator::BagContentResponse { bag_content, .. } = msg else {
+                continue;
+            };
+            let old = self.bags.get(&id).cloned().unwrap_or_default();
+            // Emit events for newly acquired resources.
+            for (&rtype, &new_count) in &bag_content.content {
+                let old_count = old.content.get(&rtype).copied().unwrap_or(0);
+                if new_count > old_count {
+                    match rtype {
+                        ResourceType::Basic(r) => {
+                            for _ in 0..(new_count - old_count) {
+                                self.events.push(GuiEvent::BasicGenerated { explorer: id, resource: r });
+                            }
+                        }
+                        ResourceType::Complex(r) => {
+                            for _ in 0..(new_count - old_count) {
+                                self.events.push(GuiEvent::ComplexGenerated { explorer: id, resource: r });
+                            }
+                        }
+                    }
+                }
+            }
+            self.bags.insert(id, bag_content);
+        }
     }
 
     pub fn drain_events(&mut self) -> Vec<GuiEvent> {
