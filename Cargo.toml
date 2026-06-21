@@ -3,8 +3,13 @@ name = "astro-parrot"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["game"]
+game = ["dep:macroquad"]
+
 [dependencies]
 common-game = "3.0.0"
 crossbeam-channel = "0.5.15"
 paste = "1.0.15"
+macroquad = { version = "0.4", optional = true }
 

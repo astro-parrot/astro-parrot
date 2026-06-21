@@ -1,21 +1,24 @@
-use common_game::protocols::orchestrator_planet::{OrchestratorToPlanet, PlanetToOrchestrator};
-use common_game::protocols::planet_explorer::{ExplorerToPlanet, PlanetToExplorer};
-use crossbeam_channel::{Receiver, Sender, unbounded};
+#[cfg(feature = "game")]
+mod game;
 
-type PlanetOrchHalfChannels = (Receiver<OrchestratorToPlanet>, Sender<PlanetToOrchestrator>);
-type PlanetExplHalfChannels = (Receiver<ExplorerToPlanet>, Sender<PlanetToExplorer>);
-
-fn get_test_channels() -> (PlanetOrchHalfChannels, PlanetExplHalfChannels) {
-    let (_, rx_orch_in) = unbounded::<OrchestratorToPlanet>();
-    let (tx_orch_out, _) = unbounded::<PlanetToOrchestrator>();
-    let (_, rx_expl_in) = unbounded::<ExplorerToPlanet>();
-    let (tx_expl_out, _) = unbounded::<PlanetToExplorer>();
-
-    ((rx_orch_in, tx_orch_out), (rx_expl_in, tx_expl_out))
+#[cfg(feature = "game")]
+fn window_conf() -> macroquad::window::Conf {
+    macroquad::window::Conf {
+        window_title: "AstroParrot".to_owned(),
+        window_width: 1000,
+        window_height: 700,
+        high_dpi: true,
+        ..Default::default()
+    }
 }
 
+#[cfg(feature = "game")]
+#[macroquad::main(window_conf)]
+async fn main() {
+    game::run().await;
+}
+
+#[cfg(not(feature = "game"))]
 fn main() {
-    let (orch_ch, expl_ch) = get_test_channels();
-    let _planet = astro_parrot::create_planet(orch_ch.0, orch_ch.1, expl_ch.0, 1);
-    println!("Planet created successfully");
+    eprintln!("astro-parrot was built without the `game` feature; nothing to run.");
 }
