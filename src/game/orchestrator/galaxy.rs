@@ -46,4 +46,9 @@ impl Galaxy {
     pub fn are_connected(&self, a: ID, b: ID) -> bool {
         self.connections.get(&a).is_some_and(|n| n.contains(&b))
     }
+
+    #[must_use]
+    pub fn neighbours(&self, id: ID) -> Vec<ID> {
+        self.connections.get(&id).map(|n| n.iter().copied().collect()).unwrap_or_default()
+    }
 }

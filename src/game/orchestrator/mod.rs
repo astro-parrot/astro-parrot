@@ -6,5 +6,5 @@ mod core;
 mod events;
 mod galaxy;
 
-pub use core::{Command, MAX_PLANETS, Orchestrator};
+pub use core::{Command, Orchestrator};
 pub use events::GuiEvent;
