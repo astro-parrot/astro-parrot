@@ -327,6 +327,13 @@ impl AiExplorer {
                 return None;
             }
             match self.recv_any(remaining) {
+                // A stopped planet only ever answers with `Stopped`: the planet
+                // we are talking to has been destroyed, so remember that and
+                // treat the request as unanswered.
+                Incoming::Planet(PlanetToExplorer::Stopped) => {
+                    self.knowledge.mark_dead(self.current_planet);
+                    return None;
+                }
                 Incoming::Planet(msg) => return Some(msg),
                 Incoming::Orchestrator(msg) => self.handle_orchestrator(msg),
                 Incoming::OrchestratorClosed => {

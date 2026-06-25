@@ -37,7 +37,29 @@ impl AiExplorer {
             StrategyState::Exploring => self.explore_step(),
             StrategyState::Collecting => self.collect_step(),
             StrategyState::Crafting => self.craft_step(),
-            StrategyState::Done => {} // nothing left to do; just end the turn
+            StrategyState::Done => self.maybe_rescan(),
+        }
+    }
+
+    /// While idle, keep watching for planets added to the galaxy after the first
+    /// sweep. If a newly reachable planet appears, resume exploring — and give
+    /// previously-impossible resources another chance, since the new planet may
+    /// be able to provide them.
+    fn maybe_rescan(&mut self) {
+        let current = self.current_planet;
+        self.send_orchestrator(ExplorerToOrchestrator::NeighborsRequest {
+            explorer_id: self.id,
+            current_planet_id: current,
+        });
+        if let Some(OrchestratorToExplorer::NeighborsResponse { neighbors }) =
+            self.await_orchestrator(OrchestratorToExplorerKind::NeighborsResponse, super::ORCH_TIMEOUT)
+        {
+            self.knowledge.entry(current).neighbors = neighbors.into_iter().collect();
+        }
+        if self.next_unvisited().is_some() {
+            self.unobtainable.clear();
+            self.stall = 0;
+            self.state = StrategyState::Exploring;
         }
     }
 
@@ -143,6 +165,9 @@ impl AiExplorer {
         while let Some(cur) = queue.pop_front() {
             let Some(pk) = self.knowledge.get(cur) else { continue };
             for &nb in &pk.neighbors {
+                if self.knowledge.is_dead(nb) {
+                    continue; // never route through or to a destroyed planet
+                }
                 if !self.knowledge.is_visited(nb) && !self.unreachable.contains(&nb) {
                     return Some(self.first_hop(cur, nb, &parent));
                 }
@@ -305,6 +330,12 @@ impl AiExplorer {
     }
 
     fn combine(&mut self, ty: ComplexResourceType) -> bool {
+        // A planet with no charged cell silently *discards* the ingredients of a
+        // combine request instead of answering, so the resources would be lost.
+        // Only hand them over once we have confirmed the planet has energy.
+        if !self.planet_has_energy() {
+            return false;
+        }
         let Some(req) = recipes::build_request(&mut self.bag, ty) else {
             return false;
         };
@@ -319,10 +350,19 @@ impl AiExplorer {
                 self.recover(g2);
                 false
             }
-            // Timeout: the ingredients were already handed to the planet and are
-            // lost for this attempt (the planet never answered).
+            // Timeout despite confirmed energy: the planet died in between. The
+            // ingredients handed over are lost for this attempt.
             _ => false,
         }
+    }
+
+    /// Asks the current planet whether it has at least one charged cell.
+    fn planet_has_energy(&mut self) -> bool {
+        self.send_planet(ExplorerToPlanet::AvailableEnergyCellRequest { explorer_id: self.id });
+        matches!(
+            self.await_planet(super::PLANET_TIMEOUT),
+            Some(PlanetToExplorer::AvailableEnergyCellResponse { available_cells }) if available_cells >= 1
+        )
     }
 
     /// All complex resources that must be produced for the task, intermediates
@@ -366,7 +406,7 @@ impl AiExplorer {
         self.knowledge
             .planets
             .values()
-            .filter(|p| p.basics.contains(&ty))
+            .filter(|p| !p.dead && p.basics.contains(&ty))
             .map(|p| p.id)
             .collect()
     }
@@ -375,7 +415,7 @@ impl AiExplorer {
         self.knowledge
             .planets
             .values()
-            .filter(|p| p.combinations.contains(&ty))
+            .filter(|p| !p.dead && p.combinations.contains(&ty))
             .map(|p| p.id)
             .collect()
     }

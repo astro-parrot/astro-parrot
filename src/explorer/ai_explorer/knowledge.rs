@@ -23,6 +23,8 @@ pub struct PlanetKnowledge {
     pub charged_cells: ID,
     /// Whether we have already queried this planet's capabilities.
     pub visited: bool,
+    /// Whether the planet has been destroyed / stopped (excluded from planning).
+    pub dead: bool,
 }
 
 impl PlanetKnowledge {
@@ -34,6 +36,7 @@ impl PlanetKnowledge {
             combinations: HashSet::new(),
             charged_cells: 0,
             visited: false,
+            dead: false,
         }
     }
 }
@@ -71,5 +74,17 @@ impl ExplorerKnowledge {
     /// Whether the planet's capabilities have already been queried.
     pub fn is_visited(&self, id: ID) -> bool {
         self.planets.get(&id).is_some_and(|p| p.visited)
+    }
+
+    /// Whether the planet is known to be destroyed / stopped.
+    pub fn is_dead(&self, id: ID) -> bool {
+        self.planets.get(&id).is_some_and(|p| p.dead)
+    }
+
+    /// Marks a planet as destroyed: excluded from travel and planning.
+    pub fn mark_dead(&mut self, id: ID) {
+        let planet = self.entry(id);
+        planet.dead = true;
+        planet.visited = true;
     }
 }
