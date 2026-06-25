@@ -1,10 +1,12 @@
 //! End-to-end test of the autonomous `AiExplorer`.
 //!
 //! A real AstroParrot planet (generates Carbon, combines Diamond) runs in one
-//! thread, the explorer in another, and the test plays a minimal orchestrator:
-//! it keeps the planet charged with sunrays and answers the explorer's
-//! `NeighborsRequest`. With no command other than `StartExplorerAI`, the
-//! explorer must explore, mine Carbon and craft a Diamond on its own.
+//! thread, the explorer in another, and the test plays a minimal **turn-based**
+//! orchestrator that mirrors `Orchestrator::poll_explorers`: each turn it sends
+//! the explorer a `BagContentRequest`, answers its `NeighborsRequest` /
+//! `TravelToPlanetRequest`, and ends the turn when the explorer reports its bag.
+//! With no command other than `StartExplorerAI`, the explorer must explore, mine
+//! Carbon and craft a Diamond on its own.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -19,7 +21,7 @@ use common_game::protocols::orchestrator_planet::{OrchestratorToPlanet, PlanetTo
 use common_game::protocols::planet_explorer::{ExplorerToPlanet, PlanetToExplorer};
 use crossbeam_channel::unbounded;
 
-const STEP: Duration = Duration::from_millis(500);
+const ACK: Duration = Duration::from_millis(500);
 
 #[test]
 fn ai_explorer_explores_collects_and_crafts() {
@@ -48,14 +50,18 @@ fn ai_explorer_explores_collects_and_crafts() {
 
     // Bring the planet online and register the explorer on it.
     o2p_tx.send(OrchestratorToPlanet::StartPlanetAI).unwrap();
-    p2o_rx.recv_timeout(STEP).expect("planet did not start");
+    p2o_rx.recv_timeout(ACK).expect("planet did not start");
     o2p_tx
         .send(OrchestratorToPlanet::IncomingExplorerRequest { explorer_id, new_sender: p2e_tx })
         .unwrap();
-    p2o_rx.recv_timeout(STEP).expect("planet did not accept explorer");
+    p2o_rx.recv_timeout(ACK).expect("planet did not accept explorer");
 
-    // Minimal orchestrator: keep the planet charged, answer neighbour queries,
-    // and track the latest reported bag.
+    // Start the explorer AI (the only command it needs), as the orchestrator
+    // does on spawn.
+    o2e_tx.send(OrchestratorToExplorer::StartExplorerAI).unwrap();
+    e2o_rx.recv_timeout(ACK).expect("explorer did not start");
+
+    // Minimal turn-based orchestrator running on its own thread.
     let stop = Arc::new(AtomicBool::new(false));
     let bag = Arc::new(Mutex::new(BagContent::default()));
     let driver = {
@@ -64,37 +70,43 @@ fn ai_explorer_explores_collects_and_crafts() {
         let o2p_tx = o2p_tx.clone();
         let o2e_tx = o2e_tx.clone();
         thread::spawn(move || {
-            let mut last_sun = Instant::now();
-            let mut last_bag_req = Instant::now();
             while !stop.load(Ordering::Relaxed) {
-                if last_sun.elapsed() >= Duration::from_millis(15) {
+                // Keep the planet's energy cells charged.
+                for _ in 0..3 {
                     let _ = o2p_tx.send(OrchestratorToPlanet::Sunray(Sunray::default()));
-                    let _ = p2o_rx.recv_timeout(Duration::from_millis(50)); // drain ack
-                    last_sun = Instant::now();
+                    let _ = p2o_rx.recv_timeout(ACK);
                 }
-                if last_bag_req.elapsed() >= Duration::from_millis(30) {
-                    let _ = o2e_tx.send(OrchestratorToExplorer::BagContentRequest);
-                    last_bag_req = Instant::now();
+                // One explorer turn.
+                if o2e_tx.send(OrchestratorToExplorer::BagContentRequest).is_err() {
+                    break;
                 }
-                match e2o_rx.recv_timeout(Duration::from_millis(5)) {
-                    Ok(ExplorerToOrchestrator::NeighborsRequest { .. }) => {
-                        // Single-planet galaxy: no neighbours to travel to.
-                        let _ = o2e_tx.send(OrchestratorToExplorer::NeighborsResponse { neighbors: vec![] });
+                loop {
+                    match e2o_rx.recv_timeout(ACK) {
+                        Ok(ExplorerToOrchestrator::BagContentResponse { bag_content, .. }) => {
+                            *bag.lock().unwrap() = bag_content;
+                            break;
+                        }
+                        Ok(ExplorerToOrchestrator::NeighborsRequest { .. }) => {
+                            // Single-planet galaxy: no neighbours.
+                            let _ = o2e_tx
+                                .send(OrchestratorToExplorer::NeighborsResponse { neighbors: vec![] });
+                        }
+                        Ok(ExplorerToOrchestrator::TravelToPlanetRequest { dst_planet_id, .. }) => {
+                            let _ = o2e_tx.send(OrchestratorToExplorer::MoveToPlanet {
+                                sender_to_new_planet: None,
+                                planet_id: dst_planet_id,
+                            });
+                            let _ = e2o_rx.recv_timeout(ACK); // consume MovedToPlanetResult
+                        }
+                        _ => break,
                     }
-                    Ok(ExplorerToOrchestrator::BagContentResponse { bag_content, .. }) => {
-                        *bag.lock().unwrap() = bag_content;
-                    }
-                    _ => {}
                 }
             }
         })
     };
 
-    // The only command the explorer needs.
-    o2e_tx.send(OrchestratorToExplorer::StartExplorerAI).unwrap();
-
     // Wait until a Diamond shows up in the bag.
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(15);
     let mut crafted = false;
     while Instant::now() < deadline {
         let diamonds = bag

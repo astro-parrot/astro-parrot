@@ -147,3 +147,87 @@ fn orchestrator_explorer_planet_pipeline() {
     assert!(explorer_handle.join().is_ok());
     assert!(planet_handle.join().is_ok());
 }
+
+/// Verifies an explorer autonomously initiates travel: when given turns
+/// (BagContentRequest) it eventually asks for neighbours and requests a move,
+/// completing the handshake. The test plays the orchestrator.
+#[test]
+fn explorer_autonomously_travels() {
+    let planet_id = 1u32;
+    let explorer_id = 50u32;
+
+    // A real planet for the explorer to mine while taking its turns.
+    let (o2p_tx, o2p_rx) = unbounded::<OrchestratorToPlanet>();
+    let (p2o_tx, p2o_rx) = unbounded::<PlanetToOrchestrator>();
+    let (e2p_tx, e2p_rx) = unbounded::<ExplorerToPlanet>();
+
+    let mut planet = create_planet(o2p_rx, p2o_tx, e2p_rx, planet_id);
+    let planet_handle = thread::spawn(move || {
+        let _ = planet.run();
+    });
+
+    let (o2e_tx, o2e_rx) = unbounded::<OrchestratorToExplorer>();
+    let (e2o_tx, e2o_rx) = unbounded::<ExplorerToOrchestrator<BagContent>>();
+    let (p2e_tx, p2e_rx) = unbounded::<PlanetToExplorer>();
+
+    let mut explorer = MockExplorer::new(explorer_id, planet_id, o2e_rx, e2o_tx, e2p_tx, p2e_rx);
+    let explorer_handle = thread::spawn(move || {
+        let _ = explorer.run();
+    });
+
+    // Start planet, register and start the explorer.
+    o2p_tx.send(OrchestratorToPlanet::StartPlanetAI).unwrap();
+    p2o_rx.recv_timeout(TIMEOUT).unwrap();
+    o2p_tx
+        .send(OrchestratorToPlanet::IncomingExplorerRequest { explorer_id, new_sender: p2e_tx })
+        .unwrap();
+    p2o_rx.recv_timeout(TIMEOUT).unwrap();
+    o2e_tx.send(OrchestratorToExplorer::StartExplorerAI).unwrap();
+    expect_explorer(&e2o_rx);
+
+    // A destination planet's request channel (kept alive so it stays connected).
+    let (dst_tx, _dst_rx) = unbounded::<ExplorerToPlanet>();
+    let dst_planet = 2u32;
+
+    // Give the explorer turns until it autonomously travels.
+    let mut moved = false;
+    for _ in 0..8 {
+        o2e_tx.send(OrchestratorToExplorer::BagContentRequest).unwrap();
+        loop {
+            match expect_explorer(&e2o_rx) {
+                ExplorerToOrchestrator::BagContentResponse { .. } => break,
+                ExplorerToOrchestrator::NeighborsRequest { current_planet_id, .. } => {
+                    assert_eq!(current_planet_id, planet_id);
+                    o2e_tx
+                        .send(OrchestratorToExplorer::NeighborsResponse { neighbors: vec![dst_planet] })
+                        .unwrap();
+                }
+                ExplorerToOrchestrator::TravelToPlanetRequest { dst_planet_id, .. } => {
+                    assert_eq!(dst_planet_id, dst_planet);
+                    o2e_tx
+                        .send(OrchestratorToExplorer::MoveToPlanet {
+                            sender_to_new_planet: Some(dst_tx.clone()),
+                            planet_id: dst_planet,
+                        })
+                        .unwrap();
+                }
+                ExplorerToOrchestrator::MovedToPlanetResult { planet_id, .. } => {
+                    assert_eq!(planet_id, dst_planet);
+                    moved = true;
+                }
+                other => panic!("unexpected explorer message: {other:?}"),
+            }
+        }
+        if moved {
+            break;
+        }
+    }
+    assert!(moved, "explorer never autonomously traveled");
+
+    // Tear down.
+    o2e_tx.send(OrchestratorToExplorer::KillExplorer).unwrap();
+    assert!(explorer_handle.join().is_ok());
+    o2p_tx.send(OrchestratorToPlanet::KillPlanet).unwrap();
+    p2o_rx.recv_timeout(TIMEOUT).unwrap();
+    assert!(planet_handle.join().is_ok());
+}

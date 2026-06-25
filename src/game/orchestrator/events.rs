@@ -1,6 +1,5 @@
 //! Semantic events emitted by the orchestrator for the GUI to animate.
 
-use common_game::components::resource::{BasicResourceType, ComplexResourceType};
 use common_game::utils::ID;
 
 #[derive(Debug, Clone, Copy)]
@@ -9,8 +8,6 @@ pub enum GuiEvent {
     AsteroidDeflected { planet: ID },
     PlanetDestroyed { planet: ID },
     ExplorerMoved { explorer: ID, to: ID },
-    BasicGenerated { explorer: ID, resource: BasicResourceType },
-    ComplexGenerated { explorer: ID, resource: ComplexResourceType },
 }
 
 #[derive(Default)]

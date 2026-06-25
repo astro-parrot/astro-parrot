@@ -1,13 +1,18 @@
 //! The orchestrator: spawns and drives planet and explorer threads.
+//!
+//! Planets are driven with the request/ack pattern. Explorers are *polled*: once
+//! per cycle the orchestrator sends each explorer a `BagContentRequest`, which is
+//! the explorer's turn. During that turn the explorer may autonomously ask to
+//! move (`NeighborsRequest` / `TravelToPlanetRequest`), which the orchestrator
+//! services before the explorer finally answers with its bag.
 
 use std::collections::HashMap;
 use std::thread::{self, JoinHandle};
 
 use astro_parrot::{AiExplorer, BagContent, Explorer, create_planet};
-use common_game::components::asteroid::Asteroid;
 use common_game::components::planet::DummyPlanetState;
-use common_game::components::resource::ResourceType;
 use common_game::components::sunray::Sunray;
+use common_game::components::asteroid::Asteroid;
 use common_game::protocols::orchestrator_explorer::{
     ExplorerToOrchestrator, ExplorerToOrchestratorKind, OrchestratorToExplorer,
 };
@@ -34,11 +39,10 @@ struct ExplorerHandle {
     tx_planet: Sender<PlanetToExplorer>,
 }
 
-/// A manual orchestrator action requested by the GUI.
+/// A manual orchestrator action requested by the user, targeted at one planet.
 pub enum Command {
     SendSunray { planet: ID },
     SendAsteroid { planet: ID },
-    MoveExplorer { explorer: ID, dst: ID },
 }
 
 pub struct Orchestrator {
@@ -73,14 +77,9 @@ impl Orchestrator {
         }
     }
 
-    #[must_use]
-    pub fn can_add_planet(&self) -> bool {
-        self.planets.len() < MAX_PLANETS
-    }
-
     /// Spawns a new planet, starts its AI and wires it into the galaxy.
     pub fn add_planet(&mut self) -> Result<ID, String> {
-        if !self.can_add_planet() {
+        if self.planets.len() >= MAX_PLANETS {
             return Err("galaxy is full".to_string());
         }
         let id = self.next_id;
@@ -142,12 +141,11 @@ impl Orchestrator {
         Ok(id)
     }
 
-    /// Processes a manual action.
+    /// Processes a manual action targeted at one planet.
     pub fn command(&mut self, command: Command) -> Result<(), String> {
         match command {
             Command::SendSunray { planet } => self.send_sunray(planet),
             Command::SendAsteroid { planet } => self.send_asteroid(planet).map(|_| ()),
-            Command::MoveExplorer { explorer, dst } => self.move_explorer(explorer, dst),
         }
     }
 
@@ -171,7 +169,7 @@ impl Orchestrator {
                 PlanetToOrchestratorKind::AsteroidAck,
             )?
             .into_asteroid_ack()
-            .unwrap() // safe checked above
+            .unwrap() // safe: kind checked above
             .1;
 
         if rocket.is_some() {
@@ -183,64 +181,85 @@ impl Orchestrator {
         }
     }
 
-    /// Moves the explorer to the next planet it hasn't just come from (round-robin).
-    pub fn auto_move_explorer(&mut self, explorer: ID) -> Result<(), String> {
-        let current = self
-            .explorers
-            .get(&explorer)
-            .ok_or_else(|| format!("explorer {explorer} does not exist"))?
-            .current_planet;
-
-        // Pick any alive planet that is not the current one.
-        let dst = self
-            .galaxy
-            .planets()
-            .into_iter()
-            .find(|&p| p != current);
-
-        match dst {
-            Some(p) => self.move_explorer(explorer, p),
-            None => Ok(()), // only one planet, nowhere to go
+    /// Gives every explorer a turn: it mines and may autonomously travel, then
+    /// reports its bag.
+    pub fn poll_explorers(&mut self) -> Result<(), String> {
+        let ids: Vec<ID> = self.explorers.keys().copied().collect();
+        for explorer in ids {
+            self.explorer_comm
+                .send_to(explorer, OrchestratorToExplorer::BagContentRequest)?;
+            loop {
+                match self.explorer_comm.recv_from(explorer)? {
+                    ExplorerToOrchestrator::BagContentResponse { bag_content, .. } => {
+                        self.bags.insert(explorer, bag_content);
+                        break;
+                    }
+                    ExplorerToOrchestrator::NeighborsRequest { current_planet_id, .. } => {
+                        let neighbors = self.galaxy.neighbours(current_planet_id);
+                        self.explorer_comm.send_to(
+                            explorer,
+                            OrchestratorToExplorer::NeighborsResponse { neighbors },
+                        )?;
+                    }
+                    ExplorerToOrchestrator::TravelToPlanetRequest {
+                        current_planet_id,
+                        dst_planet_id,
+                        ..
+                    } => {
+                        self.handle_travel_request(explorer, current_planet_id, dst_planet_id)?;
+                    }
+                    other => {
+                        return Err(format!("unexpected message from explorer {explorer}: {other:?}"));
+                    }
+                }
+            }
         }
+        Ok(())
     }
 
-    /// Moves an explorer to a connected planet.
-    pub fn move_explorer(&mut self, explorer: ID, dst: ID) -> Result<(), String> {
-        let current = self
-            .explorers
-            .get(&explorer)
-            .ok_or_else(|| format!("explorer {explorer} does not exist"))?
-            .current_planet;
+    fn handle_travel_request(&mut self, explorer: ID, current: ID, dst: ID) -> Result<(), String> {
+        let sender = if self.galaxy.are_connected(current, dst) && self.planets.contains_key(&dst) {
+            let p2e = self.explorers[&explorer].tx_planet.clone();
+            self.notify_incoming(explorer, dst, p2e)?;
+            self.notify_outgoing(explorer, current)?;
+            Some(self.planets[&dst].tx_explorer.clone())
+        } else {
+            None
+        };
+        let moved = sender.is_some();
 
-        if current == dst {
-            return Ok(());
-        }
-        if !self.galaxy.are_connected(current, dst) {
-            return Err(format!("planets {current} and {dst} are not connected"));
-        }
-
-        let p2e = self.explorers[&explorer].tx_planet.clone();
-        self.notify_incoming(explorer, dst, p2e)?;
-        self.notify_outgoing(explorer, current)?;
-
-        let new_planet_tx = self.planets[&dst].tx_explorer.clone();
         self.explorer_comm.req_ack(
             explorer,
-            OrchestratorToExplorer::MoveToPlanet {
-                sender_to_new_planet: Some(new_planet_tx),
-                planet_id: dst,
-            },
+            OrchestratorToExplorer::MoveToPlanet { sender_to_new_planet: sender, planet_id: dst },
             ExplorerToOrchestratorKind::MovedToPlanetResult,
         )?;
 
-        self.explorers.get_mut(&explorer).unwrap().current_planet = dst;
-        self.events.push(GuiEvent::ExplorerMoved { explorer, to: dst });
+        if moved {
+            self.explorers.get_mut(&explorer).unwrap().current_planet = dst;
+            self.events.push(GuiEvent::ExplorerMoved { explorer, to: dst });
+        }
         Ok(())
     }
+
+    // ----- queries ------------------------------------------------------
 
     #[must_use]
     pub fn alive_planets(&self) -> Vec<ID> {
         self.galaxy.planets()
+    }
+
+    #[must_use]
+    pub fn neighbours(&self, planet: ID) -> Vec<ID> {
+        self.galaxy.neighbours(planet)
+    }
+
+    #[must_use]
+    pub fn explorers_on(&self, planet: ID) -> Vec<ID> {
+        self.explorers
+            .iter()
+            .filter(|(_, h)| h.current_planet == planet)
+            .map(|(&id, _)| id)
+            .collect()
     }
 
     pub fn planet_state(&mut self, planet: ID) -> Option<DummyPlanetState> {
@@ -267,47 +286,11 @@ impl Orchestrator {
         self.bags.get(&explorer)
     }
 
-    /// Polls every living explorer for its current bag and emits GUI events for
-    /// any resources that appeared since the last poll.
-    pub fn poll_bags(&mut self) {
-        let explorer_ids: Vec<ID> = self.explorers.keys().copied().collect();
-        for id in explorer_ids {
-            let Ok(msg) = self.explorer_comm.req_ack(
-                id,
-                OrchestratorToExplorer::BagContentRequest,
-                ExplorerToOrchestratorKind::BagContentResponse,
-            ) else {
-                continue;
-            };
-            let ExplorerToOrchestrator::BagContentResponse { bag_content, .. } = msg else {
-                continue;
-            };
-            let old = self.bags.get(&id).cloned().unwrap_or_default();
-            // Emit events for newly acquired resources.
-            for (&rtype, &new_count) in &bag_content.content {
-                let old_count = old.content.get(&rtype).copied().unwrap_or(0);
-                if new_count > old_count {
-                    match rtype {
-                        ResourceType::Basic(r) => {
-                            for _ in 0..(new_count - old_count) {
-                                self.events.push(GuiEvent::BasicGenerated { explorer: id, resource: r });
-                            }
-                        }
-                        ResourceType::Complex(r) => {
-                            for _ in 0..(new_count - old_count) {
-                                self.events.push(GuiEvent::ComplexGenerated { explorer: id, resource: r });
-                            }
-                        }
-                    }
-                }
-            }
-            self.bags.insert(id, bag_content);
-        }
-    }
-
     pub fn drain_events(&mut self) -> Vec<GuiEvent> {
         self.events.drain()
     }
+
+    // ----- internals ----------------------------------------------------
 
     fn notify_incoming(
         &mut self,
@@ -349,8 +332,6 @@ impl Orchestrator {
         self.kill_planet(planet)?;
         self.events.push(GuiEvent::PlanetDestroyed { planet });
 
-        // Relocate explorers that were on the destroyed planet, or kill them if
-        // there is nowhere left to go.
         let stranded: Vec<ID> = self
             .explorers
             .iter()
@@ -369,7 +350,6 @@ impl Orchestrator {
     }
 
     fn relocate_explorer(&mut self, explorer: ID, dst: ID) -> Result<(), String> {
-        // The old planet is already gone, so we only register on the new one.
         let p2e = self.explorers[&explorer].tx_planet.clone();
         self.notify_incoming(explorer, dst, p2e)?;
         let new_planet_tx = self.planets[&dst].tx_explorer.clone();

@@ -41,12 +41,7 @@ use knowledge::{ExplorerKnowledge, StrategyState};
 const PLANET_TIMEOUT: Duration = Duration::from_millis(300);
 /// How long to wait for an orchestrator reply (neighbours / move).
 const ORCH_TIMEOUT: Duration = Duration::from_millis(300);
-/// Pause inserted when an action makes no progress, to avoid busy-looping while
-/// (e.g.) waiting for a planet's energy cells to recharge.
-const BACKOFF: Duration = Duration::from_millis(150);
-/// Idle wait used once the task is finished.
-const REST: Duration = Duration::from_millis(200);
-/// Consecutive no-progress steps after which a phase gives up and moves on.
+/// Consecutive no-progress turns after which a phase gives up and moves on.
 const MAX_STALL: u32 = 40;
 
 /// One message received from either of the explorer's two inbound channels.
@@ -124,15 +119,24 @@ impl Explorer for AiExplorer {
 
     fn run(&mut self) -> Result<(), String> {
         self.knowledge.entry(self.current_planet);
+        // Turn-based driving: the orchestrator gives the explorer a turn by
+        // sending a `BagContentRequest`. On its turn the explorer performs one
+        // autonomous step — which may query/move through the orchestrator and
+        // generate/craft directly with the planet — and ends the turn by
+        // reporting its bag. Every other message is handled as it arrives.
         while self.alive {
-            if self.running {
-                self.advance();
-            } else {
-                // Idle: block until the orchestrator says something.
-                match self.rx_orchestrator.recv() {
-                    Ok(msg) => self.handle_orchestrator(msg),
-                    Err(_) => break, // orchestrator gone
+            match self.rx_orchestrator.recv() {
+                Ok(OrchestratorToExplorer::BagContentRequest) => {
+                    if self.running {
+                        self.advance();
+                    }
+                    self.reply(ExplorerToOrchestrator::BagContentResponse {
+                        explorer_id: self.id,
+                        bag_content: self.bag.to_content(),
+                    });
                 }
+                Ok(msg) => self.handle_orchestrator(msg),
+                Err(_) => break, // orchestrator gone
             }
         }
         Ok(())
@@ -390,14 +394,6 @@ impl AiExplorer {
         match resource {
             GenericResource::BasicResources(b) => self.bag.add_basic(b),
             GenericResource::ComplexResources(c) => self.bag.add_complex(c),
-        }
-    }
-
-    /// Sleeps for `dur` while still answering orchestrator messages, to pace the
-    /// loop without burning CPU.
-    fn idle(&mut self, dur: Duration) {
-        if let Ok(msg) = self.rx_orchestrator.recv_timeout(dur) {
-            self.handle_orchestrator(msg);
         }
     }
 }

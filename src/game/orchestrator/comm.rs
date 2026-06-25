@@ -110,6 +110,11 @@ impl<S, M: Tagged> CommCenter<S, M> {
             .map_err(|_| format!("failed to send to {id}"))
     }
 
+    /// Waits for the next message from actor `id`, of any kind.
+    pub fn recv_from(&mut self, id: ID) -> Result<M, String> {
+        self.demux.recv_from(id)
+    }
+
     /// Sends `msg` to actor `id` and waits for a reply of kind `expected`.
     pub fn req_ack(&mut self, id: ID, msg: S, expected: M::Kind) -> Result<M, String> {
         self.send_to(id, msg)?;

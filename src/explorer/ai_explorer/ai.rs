@@ -37,7 +37,7 @@ impl AiExplorer {
             StrategyState::Exploring => self.explore_step(),
             StrategyState::Collecting => self.collect_step(),
             StrategyState::Crafting => self.craft_step(),
-            StrategyState::Done => self.rest(),
+            StrategyState::Done => {} // nothing left to do; just end the turn
         }
     }
 
@@ -402,8 +402,6 @@ impl AiExplorer {
         self.stall += 1;
         if self.stall >= super::MAX_STALL {
             self.enter_crafting();
-        } else {
-            self.idle(super::BACKOFF);
         }
     }
 
@@ -412,12 +410,6 @@ impl AiExplorer {
         if self.stall >= super::MAX_STALL {
             self.state = StrategyState::Done;
             self.stall = 0;
-        } else {
-            self.idle(super::BACKOFF);
         }
-    }
-
-    fn rest(&mut self) {
-        self.idle(super::REST);
     }
 }
