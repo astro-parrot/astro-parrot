@@ -159,7 +159,6 @@ struct Game {
 
     awaiting: HashMap<ID, VecDeque<u64>>,
     next_ast_id: u64,
-    score: u32,
 
     asteroid_interval: f32,
     asteroid_timer: f32,
@@ -217,7 +216,6 @@ impl Game {
             stars,
             awaiting: HashMap::new(),
             next_ast_id: 0,
-            score: 0,
             asteroid_interval: 2.6,
             asteroid_timer: 2.6,
             sunray_timer: 0.5,
@@ -400,7 +398,6 @@ impl Game {
             {
                 a.dead = true;
                 r.done = true;
-                self.score += 1;
                 self.explosions.push(Explosion::blast(a.pos));
             }
         }
@@ -657,8 +654,7 @@ impl Game {
 
     fn draw_hud(&self) {
         draw_panel(12.0, 12.0, 250.0, 96.0);
-        draw_text("🦜 AstroParrot", 24.0, 40.0, 28.0, WHITE);
-        draw_text(format!("Score: {}", self.score), 24.0, 68.0, 24.0, GOLD);
+        draw_text("AstroParrot", 24.0, 40.0, 28.0, WHITE);
         let mode = if self.mode == Mode::Auto { "AUTO" } else { "MANUAL" };
         let mode_color = if self.mode == Mode::Auto { SKYBLUE } else { ORANGE };
         draw_text(format!("Mode: {mode}"), 24.0, 94.0, 22.0, mode_color);
@@ -725,12 +721,6 @@ impl Game {
     fn draw_game_over(&self) {
         draw_rectangle(0.0, 0.0, screen_width(), screen_height(), Color::new(0.0, 0.0, 0.0, 0.6));
         center_text("GALAXY LOST", screen_height() * 0.5 - 30.0, 52.0, RED);
-        center_text(
-            &format!("Final score: {}", self.score),
-            screen_height() * 0.5 + 16.0,
-            32.0,
-            WHITE,
-        );
         center_text("Press R to restart", screen_height() * 0.5 + 56.0, 26.0, Color::new(1.0, 1.0, 1.0, 0.8));
     }
 
