@@ -34,6 +34,11 @@ pub struct MockExplorer {
     diamonds: usize,
     travel_cooldown: u32,
     travel_seq: usize,
+    // What the current planet can produce (discovered on arrival).
+    known_planet: Option<ID>,
+    supported_basics: Vec<BasicResourceType>,
+    supports_diamond: bool,
+    mine_seq: usize,
 }
 
 impl Explorer for MockExplorer {
@@ -56,6 +61,10 @@ impl Explorer for MockExplorer {
             diamonds: 0,
             travel_cooldown: TRAVEL_PERIOD,
             travel_seq: 0,
+            known_planet: None,
+            supported_basics: Vec::new(),
+            supports_diamond: false,
+            mine_seq: 0,
         }
     }
 
@@ -94,10 +103,39 @@ impl MockExplorer {
     }
 
     fn autonomous_mine(&mut self) {
-        if self.carbon_count() < 2 {
-            let _ = self.generate_basic(BasicResourceType::Carbon);
-        } else {
+        self.ensure_discovered();
+        if self.supported_basics.is_empty() {
+            return;
+        }
+        // Craft a Diamond when the planet supports it and we have the Carbon.
+        if self.supports_diamond && self.carbon_count() >= 2 {
             let _ = self.craft_diamond();
+            return;
+        }
+        // Otherwise mine one of the planet's supported basic resources.
+        let basic = self.supported_basics[self.mine_seq % self.supported_basics.len()];
+        self.mine_seq += 1;
+        let _ = self.generate_basic(basic);
+    }
+
+    /// Discovers what the current planet supports, once per arrival.
+    fn ensure_discovered(&mut self) {
+        if self.known_planet == Some(self.current_planet) {
+            return;
+        }
+        self.known_planet = Some(self.current_planet);
+        self.supported_basics.clear();
+        self.supports_diamond = false;
+
+        if let Some(PlanetToExplorer::SupportedResourceResponse { resource_list }) =
+            self.planet_roundtrip(ExplorerToPlanet::SupportedResourceRequest { explorer_id: self.id })
+        {
+            self.supported_basics = resource_list.into_iter().collect();
+        }
+        if let Some(PlanetToExplorer::SupportedCombinationResponse { combination_list }) =
+            self.planet_roundtrip(ExplorerToPlanet::SupportedCombinationRequest { explorer_id: self.id })
+        {
+            self.supports_diamond = combination_list.contains(&ComplexResourceType::Diamond);
         }
     }
 
@@ -296,9 +334,8 @@ impl MockExplorer {
 
     fn bag(&self) -> BagContent {
         let mut bag = BagContent::default();
-        let carbon = self.carbon_count();
-        if carbon > 0 {
-            bag.content.insert(ResourceType::Basic(BasicResourceType::Carbon), carbon);
+        for r in &self.basics {
+            *bag.content.entry(ResourceType::Basic(r.get_type())).or_default() += 1;
         }
         if self.diamonds > 0 {
             bag.content.insert(ResourceType::Complex(ComplexResourceType::Diamond), self.diamonds);
