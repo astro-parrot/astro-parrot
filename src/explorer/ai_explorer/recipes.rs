@@ -12,6 +12,23 @@ use common_game::components::resource::{
 
 use super::bag::Bag;
 
+/// The explorer's heart's desire, in order of preference. It dreams of a harem
+/// of AI girlfriends; if the galaxy cannot support true artificial love, it
+/// settles for ever-less-romantic company.
+pub const WISHLIST: [(C, usize); 4] = [
+    (C::AIPartner, 10), // a harem of 10 AI girlfriends 💕
+    (C::Dolphin, 10),   // at least the dolphins love me 🐬
+    (C::Robot, 10),     // mechanical companionship 🤖
+    (C::Diamond, 25),   // retail therapy 💎
+];
+
+/// Picks the most-preferred goal the galaxy can actually craft, as `(resource,
+/// how many)`. Returns `None` when the galaxy can satisfy none of the wishlist
+/// (the explorer is, tragically, forever alone).
+pub fn pick_goal(feasible: &HashSet<C>) -> Option<(C, usize)> {
+    WISHLIST.into_iter().find(|(c, _)| feasible.contains(c))
+}
+
 /// Given the basic resources at least one alive planet can generate and the
 /// complex combinations available somewhere in the galaxy, returns every complex
 /// resource that can *actually* be crafted.
@@ -228,5 +245,28 @@ mod tests {
         let combos = HashSet::from([C::Life]); // Water not combinable here
         let feasible = feasible_complex(&basics, &combos);
         assert!(feasible.is_empty(), "Life is unreachable without a Water recipe");
+    }
+
+    #[test]
+    fn pick_goal_prefers_a_harem_when_possible() {
+        let feasible = HashSet::from([C::AIPartner, C::Dolphin, C::Robot, C::Diamond]);
+        assert_eq!(pick_goal(&feasible), Some((C::AIPartner, 10)));
+    }
+
+    #[test]
+    fn pick_goal_settles_for_the_best_available() {
+        // No AIPartner: settle for dolphins.
+        let feasible = HashSet::from([C::Dolphin, C::Robot, C::Diamond]);
+        assert_eq!(pick_goal(&feasible), Some((C::Dolphin, 10)));
+        // Only diamonds left: retail therapy.
+        let feasible = HashSet::from([C::Diamond]);
+        assert_eq!(pick_goal(&feasible), Some((C::Diamond, 25)));
+    }
+
+    #[test]
+    fn pick_goal_is_none_when_forever_alone() {
+        assert_eq!(pick_goal(&HashSet::new()), None);
+        // Water is craftable but not something the explorer yearns for.
+        assert_eq!(pick_goal(&HashSet::from([C::Water])), None);
     }
 }

@@ -209,11 +209,12 @@ impl AiExplorer {
                 basics.extend(&planet.basics);
                 combinations.extend(&planet.combinations);
             }
-            // Aim only for what the galaxy can actually craft (recipe-graph
-            // closure), so we never waste turns gathering basics for impossible
-            // targets (e.g. an AIPartner planet with no Silicon anywhere).
-            for c in recipes::feasible_complex(&basics, &combinations) {
-                self.task.insert(ResourceType::Complex(c), 1);
+            // Of everything the galaxy can actually craft (recipe-graph closure),
+            // pursue the explorer's heart's desire: a harem of AI girlfriends, or
+            // the best available consolation.
+            let feasible = recipes::feasible_complex(&basics, &combinations);
+            if let Some((resource, count)) = recipes::pick_goal(&feasible) {
+                self.task.insert(ResourceType::Complex(resource), count);
             }
         }
         self.state = StrategyState::Collecting;
