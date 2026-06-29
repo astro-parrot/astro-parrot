@@ -4,13 +4,47 @@
 //! can reason about *what* it needs (the shopping list of basics, the order in
 //! which to craft intermediates) independently of *which* planet can make it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use common_game::components::resource::{
     BasicResourceType as B, ComplexResourceRequest as Req, ComplexResourceType as C,
 };
 
 use super::bag::Bag;
+
+/// Given the basic resources at least one alive planet can generate and the
+/// complex combinations available somewhere in the galaxy, returns every complex
+/// resource that can *actually* be crafted.
+///
+/// This is the closure (fixed-point) of the recipe graph: a complex resource is
+/// craftable when some planet combines it and every one of its ingredients is
+/// either an available basic or itself craftable. Repeating until the set stops
+/// growing lets craftable intermediates unlock the resources that need them.
+pub fn feasible_complex(
+    available_basics: &HashSet<B>,
+    available_combinations: &HashSet<C>,
+) -> HashSet<C> {
+    let mut craftable: HashSet<C> = HashSet::new();
+    loop {
+        let mut grew = false;
+        for &ty in available_combinations {
+            if craftable.contains(&ty) {
+                continue;
+            }
+            let (basics, complex) = ingredients(ty);
+            let reachable = basics.iter().all(|b| available_basics.contains(b))
+                && complex.iter().all(|c| craftable.contains(c));
+            if reachable {
+                craftable.insert(ty);
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    craftable
+}
 
 /// The direct ingredients of a complex resource: `(basics, complex)`.
 pub fn ingredients(ty: C) -> (Vec<B>, Vec<C>) {
@@ -164,5 +198,35 @@ mod tests {
         bag.add_basic(carbon()); // only one Carbon: not enough for a Diamond
         assert!(build_request(&mut bag, C::Diamond).is_none());
         assert_eq!(bag.count_basic(B::Carbon), 1, "the lone Carbon must be returned");
+    }
+
+    #[test]
+    fn feasible_excludes_targets_with_missing_basics() {
+        // Astro-parrot planets: only Carbon, combine Diamond and AIPartner.
+        // AIPartner needs Silicon (via Robot), which nobody can generate.
+        let basics = HashSet::from([B::Carbon]);
+        let combos = HashSet::from([C::Diamond, C::AIPartner]);
+        let feasible = feasible_complex(&basics, &combos);
+        assert!(feasible.contains(&C::Diamond));
+        assert!(!feasible.contains(&C::AIPartner), "AIPartner needs Silicon: impossible");
+    }
+
+    #[test]
+    fn feasible_unlocks_through_intermediates() {
+        // With every basic and every combination, the whole tree is craftable.
+        let basics = HashSet::from([B::Carbon, B::Hydrogen, B::Oxygen, B::Silicon]);
+        let combos =
+            HashSet::from([C::Water, C::Diamond, C::Life, C::Robot, C::Dolphin, C::AIPartner]);
+        let feasible = feasible_complex(&basics, &combos);
+        assert_eq!(feasible.len(), 6, "everything should be craftable");
+    }
+
+    #[test]
+    fn feasible_blocks_intermediate_not_combinable_anywhere() {
+        // Life needs Water, but no planet combines Water -> Life is impossible.
+        let basics = HashSet::from([B::Carbon, B::Hydrogen, B::Oxygen]);
+        let combos = HashSet::from([C::Life]); // Water not combinable here
+        let feasible = feasible_complex(&basics, &combos);
+        assert!(feasible.is_empty(), "Life is unreachable without a Water recipe");
     }
 }

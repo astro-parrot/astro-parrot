@@ -199,14 +199,20 @@ impl AiExplorer {
     /// Exploration finished: pick a task (if adaptive) and start collecting.
     fn finish_exploration(&mut self) {
         if self.adaptive && self.task.is_empty() {
-            // Aim to craft one of every complex resource the galaxy can combine.
-            let mut combinable: HashSet<ComplexResourceType> = HashSet::new();
+            // Union of what the alive planets can generate and combine.
+            let mut basics: HashSet<B> = HashSet::new();
+            let mut combinations: HashSet<ComplexResourceType> = HashSet::new();
             for planet in self.knowledge.planets.values() {
-                for &c in &planet.combinations {
-                    combinable.insert(c);
+                if planet.dead {
+                    continue;
                 }
+                basics.extend(&planet.basics);
+                combinations.extend(&planet.combinations);
             }
-            for c in combinable {
+            // Aim only for what the galaxy can actually craft (recipe-graph
+            // closure), so we never waste turns gathering basics for impossible
+            // targets (e.g. an AIPartner planet with no Silicon anywhere).
+            for c in recipes::feasible_complex(&basics, &combinations) {
                 self.task.insert(ResourceType::Complex(c), 1);
             }
         }
