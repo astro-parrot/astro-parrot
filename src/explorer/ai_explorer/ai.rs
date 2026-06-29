@@ -240,15 +240,17 @@ impl AiExplorer {
                 self.unobtainable.insert(ResourceType::Basic(ty));
                 continue;
             }
-            let dst = self.pick_planet(&planets);
+            let Some(dst) = self.choose_planet(&planets) else { continue };
             if self.current_planet != dst && !self.travel_to(dst) {
                 self.unreachable.insert(dst);
                 self.bump_stall_collect();
                 return;
             }
             if self.generate_basic(ty) {
+                self.depleted.clear(); // energy is flowing again
                 self.stall = 0;
             } else {
+                self.depleted.insert(self.current_planet); // dry: try elsewhere next
                 self.bump_stall_collect();
             }
             return;
@@ -317,16 +319,18 @@ impl AiExplorer {
             if !self.has_ingredients(ty) {
                 continue; // try a different target this pass
             }
-            let dst = self.pick_planet(&planets);
+            let Some(dst) = self.choose_planet(&planets) else { continue };
             if self.current_planet != dst && !self.travel_to(dst) {
                 self.unreachable.insert(dst);
                 self.bump_stall_craft();
                 return;
             }
             if self.combine(ty) {
+                self.depleted.clear(); // energy is flowing again
                 *self.produced.entry(ty).or_default() += 1;
                 self.stall = 0;
             } else {
+                self.depleted.insert(self.current_planet); // dry: try elsewhere next
                 self.bump_stall_craft();
             }
             return;
@@ -424,6 +428,27 @@ impl AiExplorer {
             .filter(|p| !p.dead && p.combinations.contains(&ty))
             .map(|p| p.id)
             .collect()
+    }
+
+    /// Chooses where to work on a resource, skipping planets that just ran out
+    /// of energy so the explorer shops around instead of camping on a dry one.
+    /// If every candidate is depleted, forget the depletion (they have had time
+    /// to recharge) and fall back to the normal preference.
+    fn choose_planet(&mut self, candidates: &[ID]) -> Option<ID> {
+        if candidates.is_empty() {
+            return None;
+        }
+        let fresh: Vec<ID> = candidates
+            .iter()
+            .copied()
+            .filter(|id| !self.depleted.contains(id))
+            .collect();
+        if fresh.is_empty() {
+            self.depleted.clear();
+            Some(self.pick_planet(candidates))
+        } else {
+            Some(self.pick_planet(&fresh))
+        }
     }
 
     /// Prefer staying put; otherwise go to the candidate with the most charged

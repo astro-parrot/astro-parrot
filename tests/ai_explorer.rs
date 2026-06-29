@@ -446,3 +446,125 @@ fn ai_explorer_rescans_for_new_planets() {
 
     assert!(travelled, "explorer should re-scan and travel to the newly appeared planet");
 }
+
+/// Robustness: the explorer ends exploration on an energy-starved planet and
+/// must fall back to a charged one to actually collect and craft.
+#[test]
+fn ai_explorer_falls_back_to_a_charged_planet() {
+    let eid = 13u32;
+
+    let (o2p1_tx, o2p1_rx) = unbounded::<OrchestratorToPlanet>();
+    let (p2o1_tx, p2o1_rx) = unbounded::<PlanetToOrchestrator>();
+    let (e2p1_tx, e2p1_rx) = unbounded::<ExplorerToPlanet>();
+    let (o2p2_tx, o2p2_rx) = unbounded::<OrchestratorToPlanet>();
+    let (p2o2_tx, p2o2_rx) = unbounded::<PlanetToOrchestrator>();
+    let (e2p2_tx, e2p2_rx) = unbounded::<ExplorerToPlanet>();
+    let (o2e_tx, o2e_rx) = unbounded::<OrchestratorToExplorer>();
+    let (e2o_tx, e2o_rx) = unbounded::<ExplorerToOrchestrator<BagContent>>();
+    let (p2e_tx, p2e_rx) = unbounded::<PlanetToExplorer>();
+
+    let mut planet1 = create_planet(o2p1_rx, p2o1_tx, e2p1_rx, 1);
+    let h1 = thread::spawn(move || {
+        let _ = planet1.run();
+    });
+    let mut planet2 = create_planet(o2p2_rx, p2o2_tx, e2p2_rx, 2);
+    let h2 = thread::spawn(move || {
+        let _ = planet2.run();
+    });
+
+    // Explorer starts on planet 1, but exploration will leave it on planet 2.
+    let mut explorer = AiExplorer::new(eid, 1, o2e_rx, e2o_tx, e2p1_tx.clone(), p2e_rx);
+    let he = thread::spawn(move || {
+        let _ = explorer.run();
+    });
+
+    o2p1_tx.send(OrchestratorToPlanet::StartPlanetAI).unwrap();
+    p2o1_rx.recv_timeout(ACK).unwrap();
+    o2p2_tx.send(OrchestratorToPlanet::StartPlanetAI).unwrap();
+    p2o2_rx.recv_timeout(ACK).unwrap();
+    o2p1_tx
+        .send(OrchestratorToPlanet::IncomingExplorerRequest { explorer_id: eid, new_sender: p2e_tx.clone() })
+        .unwrap();
+    p2o1_rx.recv_timeout(ACK).unwrap();
+    o2e_tx.send(OrchestratorToExplorer::StartExplorerAI).unwrap();
+    e2o_rx.recv_timeout(ACK).unwrap();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let bag = Arc::new(Mutex::new(BagContent::default()));
+
+    let driver = {
+        let stop = Arc::clone(&stop);
+        let bag = Arc::clone(&bag);
+        let o2e_tx = o2e_tx.clone();
+        let o2p1_tx = o2p1_tx.clone();
+        let o2p2_tx = o2p2_tx.clone();
+        thread::spawn(move || {
+            let mut current = 1u32;
+            while !stop.load(Ordering::Relaxed) {
+                // Only planet 1 ever gets energy; planet 2 stays starved.
+                pump_sunray(&o2p1_tx, &p2o1_rx);
+                if o2e_tx.send(OrchestratorToExplorer::BagContentRequest).is_err() {
+                    break;
+                }
+                loop {
+                    match e2o_rx.recv_timeout(ACK) {
+                        Ok(ExplorerToOrchestrator::BagContentResponse { bag_content, .. }) => {
+                            *bag.lock().unwrap() = bag_content;
+                            break;
+                        }
+                        Ok(ExplorerToOrchestrator::NeighborsRequest { current_planet_id, .. }) => {
+                            let other = if current_planet_id == 1 { 2 } else { 1 };
+                            let _ = o2e_tx.send(OrchestratorToExplorer::NeighborsResponse { neighbors: vec![other] });
+                        }
+                        Ok(ExplorerToOrchestrator::TravelToPlanetRequest { dst_planet_id, .. }) => {
+                            if dst_planet_id == 2 && current == 1 {
+                                handoff(eid, &p2e_tx, &o2p2_tx, &p2o2_rx, &e2p2_tx, &o2p1_tx, &p2o1_rx, &o2e_tx, &e2o_rx, 2);
+                                current = 2;
+                            } else if dst_planet_id == 1 && current == 2 {
+                                handoff(eid, &p2e_tx, &o2p1_tx, &p2o1_rx, &e2p1_tx, &o2p2_tx, &p2o2_rx, &o2e_tx, &e2o_rx, 1);
+                                current = 1;
+                            } else {
+                                let _ = o2e_tx.send(OrchestratorToExplorer::MoveToPlanet {
+                                    sender_to_new_planet: None,
+                                    planet_id: dst_planet_id,
+                                });
+                                let _ = e2o_rx.recv_timeout(ACK);
+                            }
+                        }
+                        _ => break,
+                    }
+                }
+            }
+        })
+    };
+
+    // It can only craft a Diamond if it falls back from starved planet 2 to
+    // charged planet 1.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut crafted = false;
+    while Instant::now() < deadline {
+        let diamonds = bag
+            .lock()
+            .unwrap()
+            .content
+            .get(&ResourceType::Complex(ComplexResourceType::Diamond))
+            .copied()
+            .unwrap_or(0);
+        if diamonds >= 1 {
+            crafted = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    let _ = driver.join();
+    o2e_tx.send(OrchestratorToExplorer::KillExplorer).unwrap();
+    o2p1_tx.send(OrchestratorToPlanet::KillPlanet).unwrap();
+    o2p2_tx.send(OrchestratorToPlanet::KillPlanet).unwrap();
+    let _ = he.join();
+    let _ = h1.join();
+    let _ = h2.join();
+
+    assert!(crafted, "explorer should fall back to the charged planet and craft a Diamond");
+}

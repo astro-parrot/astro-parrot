@@ -78,6 +78,9 @@ pub struct AiExplorer {
     unreachable: HashSet<ID>,
     /// Resources no known planet can provide (avoid chasing them forever).
     unobtainable: HashSet<ResourceType>,
+    /// Planets that just ran out of energy: try a different one before coming
+    /// back. Cleared on any success or once every candidate is depleted.
+    depleted: HashSet<ID>,
     /// Consecutive no-progress steps in the current phase.
     stall: u32,
 
@@ -111,6 +114,7 @@ impl Explorer for AiExplorer {
             produced: HashMap::new(),
             unreachable: HashSet::new(),
             unobtainable: HashSet::new(),
+            depleted: HashSet::new(),
             stall: 0,
             running: false,
             alive: true,
@@ -167,6 +171,7 @@ impl AiExplorer {
                 self.bag.clear();
                 self.produced.clear();
                 self.unreachable.clear();
+                self.depleted.clear();
                 self.unobtainable.clear();
                 self.task.clear();
                 self.state = StrategyState::Exploring;
