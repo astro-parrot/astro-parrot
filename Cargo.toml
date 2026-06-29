@@ -5,7 +5,16 @@ edition = "2024"
 
 [features]
 default = ["game"]
-game = ["dep:macroquad"]
+game = [
+    "dep:macroquad",
+    "dep:rust-eze",
+    "dep:one_million_crabs",
+    "dep:luna4",
+    "dep:trip",
+    "dep:skycartel",
+    "dep:the-compiler-strikes-back",
+    "dep:immutable_cosmic_borrow",
+]
 
 [dependencies]
 common-game = "3.0.0"
@@ -13,3 +22,11 @@ crossbeam-channel = "0.5.15"
 paste = "1.0.15"
 macroquad = { version = "0.4", optional = true }
 
+# Other groups' planets (same common-game interface), used by the game galaxy.
+rust-eze = { git = "https://github.com/Rust-eze-Advanced-Programming/pub-Rust-eze", package = "pub-rust-eze", optional = true }
+one_million_crabs = { git = "https://github.com/Advance-Programming-2025/One_million_crabs", package = "one-million-crabs", optional = true }
+luna4 = { git = "https://github.com/luna4-ap2025/Planet_Luna4.git", optional = true }
+trip = { git = "https://github.com/Totally-Reliable-Imaginary-Planets/TRIP", optional = true }
+skycartel = { git = "https://github.com/0TH08/Skycartel", optional = true }
+the-compiler-strikes-back = { git = "https://github.com/TheCompilerStrikesBackAP2025/TheCompilerStrikesBack", optional = true }
+immutable_cosmic_borrow = { git = "https://github.com/ImmutableCosmicBorrow/planet", optional = true }

@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::thread::{self, JoinHandle};
 
-use astro_parrot::{AiExplorer, BagContent, Explorer, create_planet};
+use astro_parrot::{AiExplorer, BagContent, Explorer};
 use common_game::components::planet::DummyPlanetState;
 use common_game::components::sunray::Sunray;
 use common_game::components::asteroid::Asteroid;
@@ -23,6 +23,7 @@ use crossbeam_channel::{Sender, unbounded};
 
 use super::comm::{ExplorerComm, PlanetComm};
 use super::events::{EventBuffer, GuiEvent};
+use super::factory::{self, PlanetKind};
 use super::galaxy::Galaxy;
 
 /// Maximum number of planets allowed in the galaxy.
@@ -31,6 +32,8 @@ pub const MAX_PLANETS: usize = 8;
 struct PlanetHandle {
     thread: JoinHandle<()>,
     tx_explorer: Sender<ExplorerToPlanet>,
+    name: &'static str,
+    type_label: String,
 }
 
 struct ExplorerHandle {
@@ -77,8 +80,18 @@ impl Orchestrator {
         }
     }
 
-    /// Spawns a new planet, starts its AI and wires it into the galaxy.
-    pub fn add_planet(&mut self) -> Result<ID, String> {
+    /// Builds the fixed galaxy (one planet per group) and returns the planet ids
+    /// in roster order.
+    pub fn populate_galaxy(&mut self) -> Result<Vec<ID>, String> {
+        let mut ids = Vec::new();
+        for &kind in &factory::PLANET_ORDER {
+            ids.push(self.add_planet(kind)?);
+        }
+        Ok(ids)
+    }
+
+    /// Spawns a planet of the given kind, starts its AI and wires it into the galaxy.
+    fn add_planet(&mut self, kind: PlanetKind) -> Result<ID, String> {
         if self.planets.len() >= MAX_PLANETS {
             return Err("galaxy is full".to_string());
         }
@@ -87,14 +100,19 @@ impl Orchestrator {
 
         let (o2p_tx, o2p_rx) = unbounded::<OrchestratorToPlanet>();
         let (e2p_tx, e2p_rx) = unbounded::<ExplorerToPlanet>();
-        let mut planet = create_planet(o2p_rx, self.planet_to_orch_tx.clone(), e2p_rx, id);
+        let planet = factory::make_planet(kind, id, o2p_rx, self.planet_to_orch_tx.clone(), e2p_rx)?;
+        let type_label = format!("{:?}", planet.planet_type());
+        let mut planet = planet;
         let thread = thread::spawn(move || {
             let _ = planet.run();
         });
 
         self.planet_comm.register(id, o2p_tx);
         self.galaxy.add_planet(id);
-        self.planets.insert(id, PlanetHandle { thread, tx_explorer: e2p_tx });
+        self.planets.insert(
+            id,
+            PlanetHandle { thread, tx_explorer: e2p_tx, name: kind.name(), type_label },
+        );
 
         self.planet_comm.req_ack(
             id,
@@ -251,6 +269,18 @@ impl Orchestrator {
     #[must_use]
     pub fn neighbours(&self, planet: ID) -> Vec<ID> {
         self.galaxy.neighbours(planet)
+    }
+
+    /// The group name of a planet (e.g. "Skycartel").
+    #[must_use]
+    pub fn planet_name(&self, planet: ID) -> Option<&'static str> {
+        self.planets.get(&planet).map(|p| p.name)
+    }
+
+    /// The planet's type letter (A/B/C/D).
+    #[must_use]
+    pub fn planet_type(&self, planet: ID) -> Option<&str> {
+        self.planets.get(&planet).map(|p| p.type_label.as_str())
     }
 
     #[must_use]

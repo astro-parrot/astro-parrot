@@ -12,7 +12,7 @@ use std::collections::{HashMap, VecDeque};
 use std::f32::consts::TAU;
 
 use common_game::components::planet::DummyPlanetState;
-use common_game::components::resource::{BasicResourceType, ComplexResourceType, ResourceType};
+use common_game::components::resource::{ComplexResourceType, ResourceType};
 use common_game::utils::ID;
 use macroquad::prelude::*;
 use macroquad::rand::gen_range;
@@ -24,7 +24,6 @@ const ROCKET_SPEED: f32 = 480.0;
 const SUNRAY_SPEED: f32 = 420.0;
 const EXPLORER_SPEED: f32 = 240.0;
 const EXPLOSION_DUR: f32 = 0.6;
-const NUM_PLANETS: usize = 7;
 const NUM_EXPLORERS: usize = 2;
 
 /// Public entry point used by `main`.
@@ -159,7 +158,6 @@ struct Game {
 
     awaiting: HashMap<ID, VecDeque<u64>>,
     next_ast_id: u64,
-    score: u32,
 
     asteroid_interval: f32,
     asteroid_timer: f32,
@@ -186,17 +184,18 @@ impl Game {
             })
             .collect();
 
+        let ids = orch.populate_galaxy().expect("failed to build the galaxy");
+        let n = ids.len();
         let mut planets = Vec::new();
-        for i in 0..NUM_PLANETS {
-            let angle = i as f32 / NUM_PLANETS as f32 * TAU - std::f32::consts::FRAC_PI_2;
+        for (i, &id) in ids.iter().enumerate() {
+            let angle = i as f32 / n as f32 * TAU - std::f32::consts::FRAC_PI_2;
             let pos = center + vec2(angle.cos(), angle.sin()) * radius;
-            let id = orch.add_planet().expect("failed to add planet");
             planets.push(PlanetView::new(id, pos));
         }
 
         let mut explorers = Vec::new();
         for k in 0..NUM_EXPLORERS {
-            let home = &planets[k * NUM_PLANETS / NUM_EXPLORERS];
+            let home = &planets[k * n / NUM_EXPLORERS];
             let id = orch.add_explorer(home.id).expect("failed to add explorer");
             explorers.push(ExplorerView { id, pos: home.pos, dest: None });
         }
@@ -217,7 +216,6 @@ impl Game {
             stars,
             awaiting: HashMap::new(),
             next_ast_id: 0,
-            score: 0,
             asteroid_interval: 2.6,
             asteroid_timer: 2.6,
             sunray_timer: 0.5,
@@ -400,7 +398,6 @@ impl Game {
             {
                 a.dead = true;
                 r.done = true;
-                self.score += 1;
                 self.explosions.push(Explosion::blast(a.pos));
             }
         }
@@ -657,8 +654,7 @@ impl Game {
 
     fn draw_hud(&self) {
         draw_panel(12.0, 12.0, 250.0, 96.0);
-        draw_text("🦜 AstroParrot", 24.0, 40.0, 28.0, WHITE);
-        draw_text(format!("Score: {}", self.score), 24.0, 68.0, 24.0, GOLD);
+        draw_text("AstroParrot", 24.0, 40.0, 28.0, WHITE);
         let mode = if self.mode == Mode::Auto { "AUTO" } else { "MANUAL" };
         let mode_color = if self.mode == Mode::Auto { SKYBLUE } else { ORANGE };
         draw_text(format!("Mode: {mode}"), 24.0, 94.0, 22.0, mode_color);
@@ -675,9 +671,9 @@ impl Game {
         draw_text("Explorers", 24.0, y0 - 6.0, 20.0, WHITE);
         for (i, ev) in self.explorers.iter().enumerate() {
             let here = self.orch.explorer_planet(ev.id).map_or("—".to_string(), |p| format!("#{p}"));
-            let (carbon, diamonds) = self.bag_counts(ev.id);
+            let (basics, diamonds) = self.bag_counts(ev.id);
             draw_text(
-                format!("#{} @ {here}   C:{carbon}  D:{diamonds}", ev.id),
+                format!("#{} @ {here}   res:{basics}  💎:{diamonds}", ev.id),
                 24.0,
                 y0 + 18.0 + i as f32 * 22.0,
                 18.0,
@@ -692,63 +688,62 @@ impl Game {
 
     fn draw_stats(&self) {
         let Some(id) = self.selected else { return };
-        let x = screen_width() - 252.0;
+        let x = screen_width() - 282.0;
         let y = 12.0;
-        draw_panel(x, y, 240.0, 150.0);
-        draw_text(format!("Planet #{id} (type C)"), x + 12.0, y + 26.0, 22.0, WHITE);
+        draw_panel(x, y, 270.0, 174.0);
+        let name = self.orch.planet_name(id).unwrap_or("?");
+        let ptype = self.orch.planet_type(id).unwrap_or("?");
+        draw_text(format!("#{id} · {name}"), x + 12.0, y + 26.0, 22.0, WHITE);
+        draw_text(format!("Type {ptype} planet"), x + 12.0, y + 48.0, 18.0, GOLD);
         if let Some(state) = &self.selected_stats {
             draw_text(
                 format!("Charged cells: {}/{}", state.charged_cells_count, state.energy_cells.len()),
                 x + 12.0,
-                y + 52.0,
+                y + 74.0,
                 20.0,
                 SKYBLUE,
             );
             let rocket = if state.has_rocket { "ready" } else { "none" };
-            draw_text(format!("Rocket: {rocket}"), x + 12.0, y + 74.0, 20.0, SKYBLUE);
+            draw_text(format!("Rocket: {rocket}"), x + 12.0, y + 96.0, 20.0, SKYBLUE);
         } else {
-            draw_text("querying...", x + 12.0, y + 52.0, 20.0, GRAY);
+            draw_text("querying...", x + 12.0, y + 74.0, 20.0, GRAY);
         }
         let mut neighbours = self.orch.neighbours(id);
         neighbours.sort_unstable();
         draw_text(
             format!("Neighbours: {neighbours:?}"),
             x + 12.0,
-            y + 100.0,
+            y + 124.0,
             18.0,
             Color::new(0.8, 0.9, 1.0, 1.0),
         );
         let here = self.orch.explorers_on(id);
-        draw_text(format!("Explorers here: {here:?}"), x + 12.0, y + 124.0, 18.0, Color::new(0.8, 0.9, 1.0, 1.0));
+        draw_text(format!("Explorers here: {here:?}"), x + 12.0, y + 148.0, 18.0, Color::new(0.8, 0.9, 1.0, 1.0));
     }
 
     fn draw_game_over(&self) {
         draw_rectangle(0.0, 0.0, screen_width(), screen_height(), Color::new(0.0, 0.0, 0.0, 0.6));
         center_text("GALAXY LOST", screen_height() * 0.5 - 30.0, 52.0, RED);
-        center_text(
-            &format!("Final score: {}", self.score),
-            screen_height() * 0.5 + 16.0,
-            32.0,
-            WHITE,
-        );
         center_text("Press R to restart", screen_height() * 0.5 + 56.0, 26.0, Color::new(1.0, 1.0, 1.0, 0.8));
     }
 
+    /// Returns `(total basic resources, diamonds)` in the explorer's bag.
     fn bag_counts(&self, explorer: ID) -> (usize, usize) {
         let Some(bag) = self.orch.bag(explorer) else {
             return (0, 0);
         };
-        let carbon = bag
+        let basics: usize = bag
             .content
-            .get(&ResourceType::Basic(BasicResourceType::Carbon))
-            .copied()
-            .unwrap_or(0);
+            .iter()
+            .filter(|(k, _)| matches!(k, ResourceType::Basic(_)))
+            .map(|(_, v)| *v)
+            .sum();
         let diamonds = bag
             .content
             .get(&ResourceType::Complex(ComplexResourceType::Diamond))
             .copied()
             .unwrap_or(0);
-        (carbon, diamonds)
+        (basics, diamonds)
     }
 }
 

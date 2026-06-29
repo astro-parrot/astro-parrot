@@ -4,6 +4,7 @@
 mod comm;
 mod core;
 mod events;
+mod factory;
 mod galaxy;
 
 pub use core::{Command, Orchestrator};
