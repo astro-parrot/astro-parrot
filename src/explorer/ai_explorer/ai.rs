@@ -366,13 +366,21 @@ impl AiExplorer {
         }
     }
 
-    /// Asks the current planet whether it has at least one charged cell.
+    /// Whether the current planet has at least one charged cell (live check).
     fn planet_has_energy(&mut self) -> bool {
+        self.current_energy() >= 1
+    }
+
+    /// Queries the current planet's live charged-cell count and refreshes the
+    /// stored estimate for it, so planet selection works on fresh data.
+    fn current_energy(&mut self) -> ID {
         self.send_planet(ExplorerToPlanet::AvailableEnergyCellRequest { explorer_id: self.id });
-        matches!(
-            self.await_planet(super::PLANET_TIMEOUT),
-            Some(PlanetToExplorer::AvailableEnergyCellResponse { available_cells }) if available_cells >= 1
-        )
+        let cells = match self.await_planet(super::PLANET_TIMEOUT) {
+            Some(PlanetToExplorer::AvailableEnergyCellResponse { available_cells }) => available_cells,
+            _ => 0,
+        };
+        self.knowledge.entry(self.current_planet).charged_cells = cells;
+        cells
     }
 
     /// All complex resources that must be produced for the task, intermediates
@@ -430,38 +438,38 @@ impl AiExplorer {
             .collect()
     }
 
-    /// Chooses where to work on a resource, skipping planets that just ran out
-    /// of energy so the explorer shops around instead of camping on a dry one.
-    /// If every candidate is depleted, forget the depletion (they have had time
-    /// to recharge) and fall back to the normal preference.
+    /// Chooses where to work on a resource, energy-aware.
+    ///
+    /// Staying put is preferred whenever the current planet still has energy: it
+    /// is the one candidate we can probe live (no travel), and avoids chasing
+    /// possibly-stale estimates of far planets. Otherwise the candidate with the
+    /// most recently-known charged cells is chosen, skipping planets that just
+    /// ran out of energy (ties prefer the current planet). If every candidate is
+    /// depleted, the depletion is forgotten — they have had time to recharge.
     fn choose_planet(&mut self, candidates: &[ID]) -> Option<ID> {
         if candidates.is_empty() {
             return None;
         }
-        let fresh: Vec<ID> = candidates
+        let current = self.current_planet;
+        if candidates.contains(&current)
+            && !self.depleted.contains(&current)
+            && self.current_energy() >= 1
+        {
+            return Some(current);
+        }
+        let mut pool: Vec<ID> = candidates
             .iter()
             .copied()
             .filter(|id| !self.depleted.contains(id))
             .collect();
-        if fresh.is_empty() {
+        if pool.is_empty() {
             self.depleted.clear();
-            Some(self.pick_planet(candidates))
-        } else {
-            Some(self.pick_planet(&fresh))
+            pool = candidates.to_vec();
         }
-    }
-
-    /// Prefer staying put; otherwise go to the candidate with the most charged
-    /// cells observed.
-    fn pick_planet(&self, planets: &[ID]) -> ID {
-        if planets.contains(&self.current_planet) {
-            return self.current_planet;
-        }
-        planets
-            .iter()
-            .copied()
-            .max_by_key(|id| self.knowledge.get(*id).map_or(0, |p| p.charged_cells))
-            .unwrap_or(self.current_planet)
+        pool.into_iter().max_by_key(|&id| {
+            let cells = self.knowledge.get(id).map_or(0, |p| p.charged_cells);
+            (cells, ID::from(id == current))
+        })
     }
 
     fn enter_crafting(&mut self) {
