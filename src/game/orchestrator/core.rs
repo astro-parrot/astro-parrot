@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::thread::{self, JoinHandle};
 
-use astro_parrot::{BagContent, Explorer, MockExplorer, create_planet};
+use astro_parrot::{BagContent, Explorer, SmartExplorer, create_planet};
 use common_game::components::planet::DummyPlanetState;
 use common_game::components::sunray::Sunray;
 use common_game::components::asteroid::Asteroid;
@@ -116,7 +116,7 @@ impl Orchestrator {
         let (p2e_tx, p2e_rx) = unbounded::<PlanetToExplorer>();
         let first_planet_tx = self.planets[&planet].tx_explorer.clone();
 
-        let mut explorer = MockExplorer::new(
+        let mut explorer = SmartExplorer::new(
             id,
             planet,
             o2e_rx,

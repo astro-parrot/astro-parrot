@@ -6,9 +6,9 @@
 use std::thread;
 use std::time::Duration;
 
-use astro_parrot::{MockExplorer, BagContent, Explorer, create_planet};
+use astro_parrot::{SmartExplorer, BagContent, Explorer, create_planet};
 use common_game::components::asteroid::Asteroid;
-use common_game::components::resource::{BasicResourceType, ComplexResourceType};
+use common_game::components::resource::{BasicResourceType, ComplexResourceType, ResourceType};
 use common_game::components::sunray::Sunray;
 use common_game::protocols::orchestrator_explorer::{ExplorerToOrchestrator, OrchestratorToExplorer};
 use common_game::protocols::orchestrator_planet::{OrchestratorToPlanet, PlanetToOrchestrator};
@@ -41,7 +41,7 @@ fn orchestrator_explorer_planet_pipeline() {
         let _ = planet.run();
     });
 
-    let mut explorer = MockExplorer::new(
+    let mut explorer = SmartExplorer::new(
         explorer_id,
         planet_id,
         o2e_rx,
@@ -170,7 +170,7 @@ fn explorer_autonomously_travels() {
     let (e2o_tx, e2o_rx) = unbounded::<ExplorerToOrchestrator<BagContent>>();
     let (p2e_tx, p2e_rx) = unbounded::<PlanetToExplorer>();
 
-    let mut explorer = MockExplorer::new(explorer_id, planet_id, o2e_rx, e2o_tx, e2p_tx, p2e_rx);
+    let mut explorer = SmartExplorer::new(explorer_id, planet_id, o2e_rx, e2o_tx, e2p_tx, p2e_rx);
     let explorer_handle = thread::spawn(move || {
         let _ = explorer.run();
     });
@@ -223,6 +223,91 @@ fn explorer_autonomously_travels() {
         }
     }
     assert!(moved, "explorer never autonomously traveled");
+
+    // Tear down.
+    o2e_tx.send(OrchestratorToExplorer::KillExplorer).unwrap();
+    assert!(explorer_handle.join().is_ok());
+    o2p_tx.send(OrchestratorToPlanet::KillPlanet).unwrap();
+    p2o_rx.recv_timeout(TIMEOUT).unwrap();
+    assert!(planet_handle.join().is_ok());
+}
+
+/// Verifies the explorer's *autonomous brain*: given only its turns (and sunrays
+/// to power the planet) it discovers the planet's recipes, mines Carbon and
+/// crafts a Diamond on its own — no manual Generate/Combine commands. The test
+/// plays the orchestrator and answers travel requests with no neighbours, so the
+/// explorer stays put.
+#[test]
+fn explorer_autonomously_crafts_a_diamond() {
+    let planet_id = 9u32;
+    let explorer_id = 77u32;
+
+    let (o2p_tx, o2p_rx) = unbounded::<OrchestratorToPlanet>();
+    let (p2o_tx, p2o_rx) = unbounded::<PlanetToOrchestrator>();
+    let (e2p_tx, e2p_rx) = unbounded::<ExplorerToPlanet>();
+
+    let mut planet = create_planet(o2p_rx, p2o_tx, e2p_rx, planet_id);
+    let planet_handle = thread::spawn(move || {
+        let _ = planet.run();
+    });
+
+    let (o2e_tx, o2e_rx) = unbounded::<OrchestratorToExplorer>();
+    let (e2o_tx, e2o_rx) = unbounded::<ExplorerToOrchestrator<BagContent>>();
+    let (p2e_tx, p2e_rx) = unbounded::<PlanetToExplorer>();
+
+    let mut explorer = SmartExplorer::new(explorer_id, planet_id, o2e_rx, e2o_tx, e2p_tx, p2e_rx);
+    let explorer_handle = thread::spawn(move || {
+        let _ = explorer.run();
+    });
+
+    // Start planet, register and start the explorer.
+    o2p_tx.send(OrchestratorToPlanet::StartPlanetAI).unwrap();
+    p2o_rx.recv_timeout(TIMEOUT).unwrap();
+    o2p_tx
+        .send(OrchestratorToPlanet::IncomingExplorerRequest { explorer_id, new_sender: p2e_tx })
+        .unwrap();
+    p2o_rx.recv_timeout(TIMEOUT).unwrap();
+    o2e_tx.send(OrchestratorToExplorer::StartExplorerAI).unwrap();
+    expect_explorer(&e2o_rx);
+
+    let sunray = || {
+        o2p_tx.send(OrchestratorToPlanet::Sunray(Sunray::default())).unwrap();
+        assert!(matches!(
+            p2o_rx.recv_timeout(TIMEOUT).unwrap(),
+            PlanetToOrchestrator::SunrayAck { .. }
+        ));
+    };
+
+    // First sunray is spent building the planet's defensive rocket; afterwards
+    // each sunray leaves one charged cell for the explorer to use.
+    sunray();
+
+    let diamond = ResourceType::Complex(ComplexResourceType::Diamond);
+    let mut crafted = false;
+    for _ in 0..20 {
+        sunray(); // one charged cell available for this turn
+        o2e_tx.send(OrchestratorToExplorer::BagContentRequest).unwrap();
+        loop {
+            match expect_explorer(&e2o_rx) {
+                ExplorerToOrchestrator::BagContentResponse { bag_content, .. } => {
+                    if bag_content.content.get(&diamond).copied().unwrap_or(0) >= 1 {
+                        crafted = true;
+                    }
+                    break;
+                }
+                ExplorerToOrchestrator::NeighborsRequest { .. } => {
+                    o2e_tx
+                        .send(OrchestratorToExplorer::NeighborsResponse { neighbors: vec![] })
+                        .unwrap();
+                }
+                other => panic!("unexpected explorer message: {other:?}"),
+            }
+        }
+        if crafted {
+            break;
+        }
+    }
+    assert!(crafted, "explorer never autonomously crafted a diamond");
 
     // Tear down.
     o2e_tx.send(OrchestratorToExplorer::KillExplorer).unwrap();
