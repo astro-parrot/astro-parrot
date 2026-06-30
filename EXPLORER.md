@@ -3,19 +3,22 @@
 Questo documento descrive **cosa fa** e **come lo fa** l'esploratore autonomo di
 AstroParrot, implementato in [`src/explorer/smart_explorer.rs`](src/explorer/smart_explorer.rs).
 
-L'esploratore è un attore che vive su un proprio thread, gira per la galassia,
-raccoglie risorse, le combina in risorse complesse e sopravvive (in senso di
-robustezza) a pianeti distrutti, energia mancante e canali che cadono — il tutto
-in modo completamente automatico e senza mai andare in panic.
+L'esploratore è un attore che vive su un proprio thread e gira per la galassia con
+**una sola ossessione: collezionare Diamanti**. Ignora ogni altra risorsa, mina il
+Carbon che gli serve, lo fonde in Diamanti e — raggiunta la quota — smette di
+raccogliere e si limita a vagare ammirando il bottino. Tutto in modo automatico,
+robusto (sopravvive a pianeti distrutti, energia mancante, canali che cadono) e
+senza mai andare in panic.
 
 ---
 
 ## 1. In una frase
 
-> Ad ogni turno l'esploratore **scopre** cosa sa fare il pianeta su cui si trova,
-> **spende l'energia disponibile** per craftare la risorsa più preziosa che riesce
-> a raggiungere risalendo l'albero delle ricette, e quando non può più fare
-> progressi (o è rimasto abbastanza a lungo) **viaggia** verso un pianeta nuovo.
+> Ad ogni turno l'esploratore **scopre** cosa sa fare il pianeta su cui si trova e
+> fa **una sola mossa** verso il prossimo Diamante (mina un Carbon, oppure fonde due
+> Carbon in un Diamante); se il pianeta non può aiutarlo **viaggia** altrove, e una
+> volta collezionati `TARGET_DIAMONDS` Diamanti entra in *museum mode* e si limita a
+> girare per la galassia.
 
 ---
 
@@ -55,8 +58,7 @@ pub trait Explorer {
 ```
 
 È un **drop-in replacement**: orchestratore, GUI e test continuano a funzionare
-identici, semplicemente costruendo `SmartExplorer::new(...)` invece del vecchio
-mock.
+identici, semplicemente costruendo `SmartExplorer::new(...)`.
 
 ---
 
@@ -78,90 +80,93 @@ mock.
   | `Dolphin`   | `Water` + `Life`     |
   | `AIPartner` | `Robot` + `Diamond`  |
 
-- Il pianeta AstroParrot (tipo C) genera `Carbon` e sa combinare `Diamond` e
-  `AIPartner`. Ogni pianeta può però avere capacità diverse: per questo
-  l'esploratore **non le assume mai**, le **chiede**.
+- La ricetta che interessa al collezionista è **una sola**: `Diamond = Carbon +
+  Carbon`. Tutto il resto della tabella esiste solo per la modalità manuale
+  (vedi §7). L'esploratore **non assume mai** le capacità di un pianeta: le **chiede**.
 
 ---
 
 ## 4. Cosa fa, passo per passo (il turno)
 
-Il "turno" dell'esploratore è scatenato dal messaggio
-`OrchestratorToExplorer::BagContentRequest`. Il metodo `take_turn` esegue 4 fasi.
+Il "turno" è scatenato dal messaggio `OrchestratorToExplorer::BagContentRequest`.
+Il metodo `take_turn` fa esattamente tre cose: **scopre**, **decide una mossa**,
+**la esegue** e infine **riporta la borsa**.
 
-### Fase 1 — Scoperta del pianeta (`ensure_caps`)
+### Passo 1 — Scoperta del pianeta (`ensure_caps`)
 Alla prima visita di un pianeta l'esploratore interroga:
+
 - `SupportedResourceRequest` → quali **basi** può generare (`gens`),
 - `SupportedCombinationRequest` → quali **complesse** può combinare (`combos`).
 
-Il risultato è messo in cache e **invalidato solo quando viaggia**. Questo rende
-l'esploratore **agnostico al pianeta**: funziona su qualunque configurazione di
-ricette, non solo su Carbon→Diamond.
+Il risultato è messo in cache e **invalidato solo quando viaggia**. Così
+l'esploratore è **agnostico al pianeta**: scopre da solo se *questo* pianeta sa
+minare Carbon e/o fondere Diamanti.
 
-### Fase 2 — Produzione (`plan` + `generate`/`combine`)
-L'esploratore chiede quante celle cariche ci sono e, finché ce ne sono (al massimo
-`MAX_OPS_PER_TURN` passi), esegue **un passo di produzione per cella**:
+### Passo 2 — Decisione della mossa (`decide`)
+Questa è la "testa" dell'esploratore. È una funzione **pura** (non tocca i canali,
+legge solo la borsa e le capacità del pianeta) e restituisce **una** delle tre
+mosse possibili, valutando le condizioni **in quest'ordine**:
 
-1. **Scelta dell'obiettivo** — fra le complesse che *questo* pianeta sa combinare,
-   ordina per "valore" (`value`): più la ricetta è profonda, più è preziosa
-   (`AIPartner` > `Dolphin` > `Robot` > `Life` > `Water` > `Diamond`).
-2. **Passo verso l'obiettivo** (`step_toward`, ricorsivo sull'albero delle
-   ricette):
-   - se ha già **entrambi gli ingredienti** in borsa → **combina** subito;
-   - altrimenti produce il **primo ingrediente mancante**:
-     - se è una **base** generabile qui → la **genera**;
-     - se è una **complessa** combinabile qui → **scende ricorsivamente** verso di
-       essa (es. per `Life` prima fa `Water`, per `Water` prima i due gas…).
-   - se un ingrediente non è ottenibile su questo pianeta, scarta quell'obiettivo
-     e prova il successivo.
-3. **Fallback** — se nessuna complessa è raggiungibile qui, fa **scorta** (bounded
-   a `MAX_BASIC_STOCK`) di una risorsa base generabile: potrà servire su un
-   pianeta successivo, dato che l'inventario viaggia con lui.
+1. **Ossessione soddisfatta?** Se in borsa ci sono già `TARGET_DIAMONDS` Diamanti
+   → `Move::Wander` (museum mode: la collezione è completa, smette di produrre).
+2. **Posso forgiare qui e ora?** Se il pianeta sa combinare `Diamond` **e** ho
+   almeno **2 Carbon** in borsa → `Move::Forge`.
+3. **Mi serve altro Carbon e qui lo posso minare?** Se il pianeta genera `Carbon`
+   **e** ne ho meno di 2 → `Move::Mine`. *Ogni altra risorsa offerta dal pianeta
+   viene deliberatamente ignorata.*
+4. **Altrimenti** (pianeta inutile per la mia ossessione) → `Move::Wander`.
 
-Esempio concreto su un pianeta tipo C (genera `Carbon`, combina `Diamond`):
-`step_toward(Diamond)` → se ha ≥2 `Carbon` combina un `Diamond`, altrimenti genera
-un `Carbon`. Con una sola cella per turno la sequenza naturale è
-`gen, gen, combine, gen, gen, combine, …` su più turni.
+### Passo 3 — Esecuzione della mossa (`take_turn`)
+A seconda di cosa ha deciso:
 
-### Fase 3 — Viaggio (`travel`)
-L'esploratore viaggia quando:
-- **non ha potuto produrre nulla** in questo turno (pianeta esaurito o senza
-  energia), **oppure**
-- è rimasto sul pianeta da `STAY_LIMIT` turni (per continuare a *girare* per la
-  galassia).
+- **`Forge`** → chiede al pianeta di combinare un `Diamond` (`combine`). Se
+  fallisce (es. niente energia), **viaggia** invece di restare bloccato.
+- **`Mine`** → chiede al pianeta di generare un `Carbon` (`generate`). Se fallisce,
+  **viaggia**.
+- **`Wander`** → **viaggia** subito (sia per cercare un pianeta utile, sia per
+  vagare in museum mode).
 
-L'handshake con l'orchestratore è:
-`NeighborsRequest` → `NeighborsResponse` → sceglie la destinazione → 
+Una mossa per turno: con una cella d'energia per turno questo mappa naturalmente
+sul ritmo del gioco. La sequenza tipica su un pianeta che mina Carbon e fonde
+Diamanti è quindi `mina, mina, forgia, mina, mina, forgia, …` su più turni, fino a
+5 Diamanti.
+
+### Passo 4 — Viaggio (`travel`)
+Quando deve spostarsi, l'handshake con l'orchestratore è:
+`NeighborsRequest` → `NeighborsResponse` → sceglie la destinazione →
 `TravelToPlanetRequest` → `MoveToPlanet` → aggiorna il canale verso il nuovo
 pianeta → `MovedToPlanetResult`.
 
 La **scelta della destinazione** preferisce i pianeti **non ancora visitati**
-(insieme `visited`); se sono tutti già visti, ruota fra i vicini
-(`travel_seq`). Così l'esploratore esplora davvero, invece di rimbalzare fra due
-pianeti.
+(insieme `visited`); se sono tutti già visti, ruota fra i vicini (`travel_seq`).
+Così l'esploratore esplora davvero, invece di rimbalzare fra due pianeti. All'arrivo
+(`arrive`) **invalida la cache** delle capacità, perché il nuovo pianeta potrebbe
+saper fare cose diverse.
 
-### Fase 4 — Resoconto (`report_bag`)
+### Passo 5 — Resoconto (`report_bag`)
 Chiude il turno inviando `BagContentResponse` con il contenuto della borsa
 (`BagContent`: una mappa `ResourceType → quantità`), che la GUI mostra e
 l'orchestratore conserva.
 
 ---
 
-## 5. Come crafta davvero (dettaglio tecnico)
+## 5. Come forgia davvero (dettaglio tecnico)
 
-Per combinare, il pianeta ha bisogno degli **oggetti risorsa tipizzati**
-(`Carbon`, `Water`, …), non di semplici conteggi. Per questo l'esploratore
-conserva gli oggetti reali ricevuti dal pianeta:
+Per combinare, il pianeta ha bisogno degli **oggetti risorsa tipizzati** (i due
+`Carbon`), non di semplici conteggi. Per questo l'esploratore conserva gli oggetti
+reali ricevuti dal pianeta:
 
 ```rust
 basics: Vec<BasicResource>,
 complexes: Vec<ComplexResource>,
 ```
 
-`build_request` estrae dagli inventari gli ingredienti del tipo giusto e costruisce
-la `ComplexResourceRequest` corretta per ognuna delle 6 ricette. Punto chiave di
-sicurezza: **controlla la disponibilità prima di rimuovere** qualsiasi cosa, così
-un fallimento parziale non perde mai una risorsa.
+`build_request` estrae dall'inventario gli ingredienti del tipo giusto e costruisce
+la `ComplexResourceRequest`. Punto chiave di sicurezza: **controlla la disponibilità
+prima di rimuovere** qualsiasi cosa, così un fallimento parziale non perde mai una
+risorsa. La funzione resta scritta per **tutte e 6** le ricette così la "combine"
+manuale (§7) continua a funzionare per qualunque risorsa, ma il cervello autonomo
+chiama solo `combine(Diamond)`.
 
 La tabella delle ricette è espressa una volta sola, in modo dichiarativo, nella
 funzione `recipe`, che rispecchia le regole della `common-game`.
@@ -187,8 +192,8 @@ per errori tecnici** e **non restare bloccato**. Le garanzie:
   l'orchestratore lo sposta con `MoveToPlanet`: l'esploratore aggiorna il canale,
   invalida la cache delle capacità e prosegue sul nuovo pianeta.
 - **Anti-stallo.** Se un pianeta non risponde alle query di capacità, la cache
-  resta "sconosciuta", la produzione non parte e l'esploratore **viaggia** invece
-  di restare fermo.
+  resta "sconosciuta", la mossa fallisce e l'esploratore **viaggia** invece di
+  restare fermo.
 - **Galassia che si rimpicciolisce.** Continuando a muoversi verso pianeti vivi,
   l'esploratore resta sempre operativo finché esiste almeno un pianeta.
 
@@ -221,23 +226,23 @@ In cima a `smart_explorer.rs`:
 |---|---|---|
 | `PLANET_TIMEOUT` | 200 ms | attesa massima di una risposta dal pianeta |
 | `ORCH_TIMEOUT` | 500 ms | attesa massima durante l'handshake di viaggio |
-| `STAY_LIMIT` | 3 | turni dopo i quali viaggia comunque (per esplorare) |
-| `MAX_OPS_PER_TURN` | 8 | tetto ai passi di produzione per turno |
-| `MAX_BASIC_STOCK` | 3 | quante basi "senza sbocco" accumulare al massimo |
+| `TARGET_DIAMONDS` | 5 | quanti Diamanti collezionare prima del *museum mode* |
 
-Cambiare questi valori regola quanto l'esploratore è aggressivo nel craftare vs.
-nell'esplorare, senza toccare la logica.
+Cambiare `TARGET_DIAMONDS` regola quanto a lungo l'esploratore resta "ossessionato"
+prima di mettersi a riposo, senza toccare la logica.
 
 ---
 
 ## 9. Perché il codice resta semplice
 
 - **Una sola struct, un solo file**, con metodi piccoli e a responsabilità unica.
-- La strategia di crafting è **data-driven**: la tabella `recipe` + la funzione
-  `value` descrivono *cosa* fare; `step_toward` è una ricorsione di poche righe che
-  decide *come*. Aggiungere/cambiare ricette non richiede toccare la logica.
-- **Un passo di produzione per cella d'energia**: mappa naturalmente sul modello a
-  turni del gioco, niente pianificatori complessi.
+- La strategia è **una sola ricetta** (`Diamond = Carbon + Carbon`): niente
+  pianificatori, niente ricorsione sull'albero delle ricette.
+- **Decisione separata dall'azione**: `decide` è pura e restituisce un `Move`
+  (`Forge` / `Mine` / `Wander`); `take_turn` la esegue. Questo rende la logica
+  banale da leggere e da testare in isolamento.
+- **Una mossa per cella d'energia**: mappa naturalmente sul modello a turni del
+  gioco.
 - Nessun `unwrap`/`panic` nei percorsi di esecuzione: solo `Option`/`Result`
   gestiti.
 
@@ -246,8 +251,8 @@ nell'esplorare, senza toccare la logica.
 ## 10. Come eseguire e verificare
 
 ```bash
-# Test end-to-end (orchestratore ↔ esploratore ↔ pianeta), senza GUI:
-cargo test --test integration --no-default-features
+# Tutti i test (unit + integrazione):
+cargo test
 
 # Build/lint completi, GUI inclusa:
 cargo build
@@ -258,20 +263,23 @@ cargo run --features game
 ```
 
 **Unit test** della logica decisionale (in `smart_explorer.rs`, eseguiti in
-isolamento, senza thread): le ricette coincidono con quelle della `common-game`,
-l'ordinamento per valore, la scelta del passo verso un `Diamond`, la **risalita
-ricorsiva** dell'albero (`Life → Water → gas`), la preferenza per l'obiettivo più
-prezioso, il progresso parziale quando l'obiettivo top è solo in parte
-raggiungibile, lo *stockpiling* di fallback e il caso "pianeta inutilizzabile".
+isolamento, senza thread, con borsa vuota — bastano a verificare *quale* mossa
+sceglie `decide` date le capacità del pianeta):
+
+- mina `Carbon` su un pianeta che sa fondere Diamanti;
+- mina `Carbon` anche dove non può fonderlo (se lo porta dietro);
+- ignora ogni risorsa che non sia `Carbon` (pianeta con solo acqua/gas → vaga);
+- vaga via da un pianeta inutilizzabile;
+- la ricetta del `Diamond` è due `Carbon`.
 
 **Test d'integrazione** (orchestratore ↔ esploratore ↔ pianeta reale):
+
 - `orchestrator_explorer_planet_pipeline`: avvio pianeta, registrazione,
   generazione `Carbon`, crafting `Diamond` (via comando), difesa dall'asteroide.
 - `explorer_autonomously_travels`: l'esploratore chiede i vicini e viaggia
   autonomamente, completando l'handshake.
 - `explorer_autonomously_crafts_a_diamond`: prova il **cervello autonomo** — con i
-  soli turni e i sunray, l'esploratore scopre le ricette, mina `Carbon` e crafta un
+  soli turni e i sunray, l'esploratore scopre le ricette, mina `Carbon` e forgia un
   `Diamond` da solo, senza comandi manuali.
 
-Stato attuale: **build pulita, nessun warning di clippy (default, anche sui test),
-11/11 test verdi** (8 unit + 3 integrazione).
+Stato attuale: **build pulita, 8/8 test verdi** (5 unit + 3 integrazione).
