@@ -74,13 +74,11 @@ impl PlanetAI for AstroParrotPlanetAI {
             }
 
             ExplorerToPlanet::CombineResourceRequest { msg, .. } => {
-                if let Some((cell, _)) = state.full_cell() {
-                    Some(PlanetToExplorer::CombineResourceResponse {
-                        complex_response: combine_complex(combinator, cell, msg),
-                    })
-                } else {
-                    None
-                }
+                let idx = state.full_cell().map(|(_, i)| i).unwrap_or(0);
+                let cell = state.cell_mut(idx);
+                Some(PlanetToExplorer::CombineResourceResponse {
+                    complex_response: combine_complex(combinator, cell, msg),
+                })
             }
 
             ExplorerToPlanet::AvailableEnergyCellRequest { .. } => {
