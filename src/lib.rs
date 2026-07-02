@@ -2,5 +2,5 @@ mod planet;
 
 pub mod explorer;
 
-pub use explorer::{MockExplorer, AiExplorer, BagContent, Explorer};
+pub use explorer::{AiExplorer, BagContent, Explorer, MockExplorer};
 pub use planet::create_planet;

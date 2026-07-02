@@ -10,9 +10,9 @@ use std::collections::HashMap;
 use std::thread::{self, JoinHandle};
 
 use astro_parrot::{AiExplorer, BagContent, Explorer};
+use common_game::components::asteroid::Asteroid;
 use common_game::components::planet::DummyPlanetState;
 use common_game::components::sunray::Sunray;
-use common_game::components::asteroid::Asteroid;
 use common_game::protocols::orchestrator_explorer::{
     ExplorerToOrchestrator, ExplorerToOrchestratorKind, OrchestratorToExplorer,
 };
@@ -100,7 +100,8 @@ impl Orchestrator {
 
         let (o2p_tx, o2p_rx) = unbounded::<OrchestratorToPlanet>();
         let (e2p_tx, e2p_rx) = unbounded::<ExplorerToPlanet>();
-        let planet = factory::make_planet(kind, id, o2p_rx, self.planet_to_orch_tx.clone(), e2p_rx)?;
+        let planet =
+            factory::make_planet(kind, id, o2p_rx, self.planet_to_orch_tx.clone(), e2p_rx)?;
         let type_label = format!("{:?}", planet.planet_type());
         let mut planet = planet;
         let thread = thread::spawn(move || {
@@ -111,7 +112,12 @@ impl Orchestrator {
         self.galaxy.add_planet(id);
         self.planets.insert(
             id,
-            PlanetHandle { thread, tx_explorer: e2p_tx, name: kind.name(), type_label },
+            PlanetHandle {
+                thread,
+                tx_explorer: e2p_tx,
+                name: kind.name(),
+                type_label,
+            },
         );
 
         self.planet_comm.req_ack(
@@ -147,8 +153,14 @@ impl Orchestrator {
         });
 
         self.explorer_comm.register(id, o2e_tx);
-        self.explorers
-            .insert(id, ExplorerHandle { current_planet: planet, thread, tx_planet: p2e_tx.clone() });
+        self.explorers.insert(
+            id,
+            ExplorerHandle {
+                current_planet: planet,
+                thread,
+                tx_planet: p2e_tx.clone(),
+            },
+        );
 
         self.notify_incoming(id, planet, p2e_tx)?;
         self.explorer_comm.req_ack(
@@ -212,7 +224,9 @@ impl Orchestrator {
                         self.bags.insert(explorer, bag_content);
                         break;
                     }
-                    ExplorerToOrchestrator::NeighborsRequest { current_planet_id, .. } => {
+                    ExplorerToOrchestrator::NeighborsRequest {
+                        current_planet_id, ..
+                    } => {
                         let neighbors = self.galaxy.neighbours(current_planet_id);
                         self.explorer_comm.send_to(
                             explorer,
@@ -227,7 +241,9 @@ impl Orchestrator {
                         self.handle_travel_request(explorer, current_planet_id, dst_planet_id)?;
                     }
                     other => {
-                        return Err(format!("unexpected message from explorer {explorer}: {other:?}"));
+                        return Err(format!(
+                            "unexpected message from explorer {explorer}: {other:?}"
+                        ));
                     }
                 }
             }
@@ -248,13 +264,17 @@ impl Orchestrator {
 
         self.explorer_comm.req_ack(
             explorer,
-            OrchestratorToExplorer::MoveToPlanet { sender_to_new_planet: sender, planet_id: dst },
+            OrchestratorToExplorer::MoveToPlanet {
+                sender_to_new_planet: sender,
+                planet_id: dst,
+            },
             ExplorerToOrchestratorKind::MovedToPlanetResult,
         )?;
 
         if moved {
             self.explorers.get_mut(&explorer).unwrap().current_planet = dst;
-            self.events.push(GuiEvent::ExplorerMoved { explorer, to: dst });
+            self.events
+                .push(GuiEvent::ExplorerMoved { explorer, to: dst });
         }
         Ok(())
     }
@@ -332,14 +352,19 @@ impl Orchestrator {
             .planet_comm
             .req_ack(
                 planet,
-                OrchestratorToPlanet::IncomingExplorerRequest { explorer_id: explorer, new_sender },
+                OrchestratorToPlanet::IncomingExplorerRequest {
+                    explorer_id: explorer,
+                    new_sender,
+                },
                 PlanetToOrchestratorKind::IncomingExplorerResponse,
             )?
             .into_incoming_explorer_response()
             .unwrap(); // safe: kind checked above
         res.map_err(|e| format!("planet {planet} refused explorer {explorer}: {e}"))?;
         if accepted != explorer {
-            return Err(format!("planet {planet} accepted the wrong explorer ({accepted})"));
+            return Err(format!(
+                "planet {planet} accepted the wrong explorer ({accepted})"
+            ));
         }
         Ok(())
     }
@@ -348,7 +373,9 @@ impl Orchestrator {
         self.planet_comm
             .req_ack(
                 planet,
-                OrchestratorToPlanet::OutgoingExplorerRequest { explorer_id: explorer },
+                OrchestratorToPlanet::OutgoingExplorerRequest {
+                    explorer_id: explorer,
+                },
                 PlanetToOrchestratorKind::OutgoingExplorerResponse,
             )?
             .into_outgoing_explorer_response()
@@ -392,7 +419,8 @@ impl Orchestrator {
             ExplorerToOrchestratorKind::MovedToPlanetResult,
         )?;
         self.explorers.get_mut(&explorer).unwrap().current_planet = dst;
-        self.events.push(GuiEvent::ExplorerMoved { explorer, to: dst });
+        self.events
+            .push(GuiEvent::ExplorerMoved { explorer, to: dst });
         Ok(())
     }
 
