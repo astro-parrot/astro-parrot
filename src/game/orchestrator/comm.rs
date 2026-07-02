@@ -1,10 +1,8 @@
 //! Communication helpers for the orchestrator.
 //!
-//! Planets and explorers each share one return channel back to the orchestrator.
-//! A [`Demux`] splits that single stream per sender id (buffering messages that
-//! arrive out of order), and a [`CommCenter`] adds the request/acknowledge
-//! pattern used throughout the orchestrator: send a message to an actor and
-//! block (with a timeout) until that actor answers with the expected kind.
+//! All planets (and all explorers) share one return channel. `Demux` splits it
+//! by sender id, buffering messages meant for another id. `CommCenter` wraps a
+//! send plus a blocking receive of the expected reply kind.
 
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};

@@ -1,6 +1,5 @@
-//! Builds planets from the various group implementations that share the
-//! `common-game` interface. Each crate exposes its own creation function with a
-//! slightly different signature/return type, which this factory normalises.
+//! Builds planets from the different group crates behind one signature. Each
+//! crate's creation function differs in argument order and return type.
 
 use std::time::Duration;
 

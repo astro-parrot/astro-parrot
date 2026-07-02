@@ -1,7 +1,9 @@
-//! Explorer abstraction.
+//! Explorer abstraction and the three explorer implementations.
 
+mod marco_explorer;
 mod mock_explorer;
-mod ai_explorer;
+#[path = "thomas_explorer/smart_explorer.rs"]
+mod thomas_explorer;
 
 use std::collections::HashMap;
 
@@ -11,8 +13,9 @@ use common_game::protocols::planet_explorer::{ExplorerToPlanet, PlanetToExplorer
 use common_game::utils::ID;
 use crossbeam_channel::{Receiver, Sender};
 
+pub use marco_explorer::AiExplorer;
 pub use mock_explorer::MockExplorer;
-pub use ai_explorer::AiExplorer;
+pub use thomas_explorer::SmartExplorer;
 
 /// The contents of an explorer's bag, reported back to the orchestrator/GUI.
 #[derive(Debug, Clone, Default)]

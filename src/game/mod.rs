@@ -1,10 +1,4 @@
-//! The AstroParrot game: an animated galaxy on top of the real orchestrator.
-//!
-//! A fixed set of planets defends itself from asteroids. Explorers roam the
-//! galaxy on their own (the orchestrator services their travel requests). The
-//! user observes, can pause/resume, switch between an autonomous (Auto) and a
-//! hands-on (Manual) mode, and click any planet to inspect it and — in Manual
-//! mode — send it an individual sunray or asteroid.
+//! macroquad front-end that renders the galaxy and drives the orchestrator.
 
 mod orchestrator;
 
@@ -24,7 +18,6 @@ const ROCKET_SPEED: f32 = 480.0;
 const SUNRAY_SPEED: f32 = 420.0;
 const EXPLORER_SPEED: f32 = 240.0;
 const EXPLOSION_DUR: f32 = 0.6;
-const NUM_EXPLORERS: usize = 2;
 
 /// Public entry point used by `main`.
 pub async fn run() {
@@ -193,12 +186,16 @@ impl Game {
             planets.push(PlanetView::new(id, pos));
         }
 
-        let mut explorers = Vec::new();
-        for k in 0..NUM_EXPLORERS {
-            let home = &planets[k * n / NUM_EXPLORERS];
-            let id = orch.add_explorer(home.id).expect("failed to add explorer");
-            explorers.push(ExplorerView { id, pos: home.pos, dest: None });
-        }
+        let planet_ids: Vec<ID> = planets.iter().map(|p| p.id).collect();
+        let explorers = orch
+            .populate_explorers(&planet_ids)
+            .expect("failed to add explorers")
+            .into_iter()
+            .map(|(id, home)| {
+                let pos = planets.iter().find(|p| p.id == home).map_or(center, |p| p.pos);
+                ExplorerView { id, pos, dest: None }
+            })
+            .collect();
 
         Self {
             orch,
@@ -222,11 +219,11 @@ impl Game {
             state_timer: 0.2,
             poll_timer: 0.6,
             stats_timer: 0.0,
-            last_event: "Auto mode. Space: pause · M: manual · click a planet for stats.".to_string(),
+            last_event: "Auto mode. Space pause, M manual, click a planet for stats.".to_string(),
         }
     }
 
-    // ----- update -------------------------------------------------------
+    // Update
 
     fn update(&mut self, dt: f32) {
         self.handle_input();
@@ -469,7 +466,7 @@ impl Game {
                     {
                         self.rockets.push(RocketShot::new(pp, aid));
                     }
-                    self.last_event = format!("Planet #{planet} deflected an asteroid! 🚀");
+                    self.last_event = format!("Planet #{planet} deflected an asteroid.");
                 }
                 GuiEvent::PlanetDestroyed { planet } => {
                     let pos = self.planet_pos(planet);
@@ -516,7 +513,7 @@ impl Game {
         }
     }
 
-    // ----- spawners -----------------------------------------------------
+    // Spawners
 
     fn spawn_sunray_to(&mut self, planet: ID) {
         let sun = self.sun_pos();
@@ -550,7 +547,7 @@ impl Game {
         self.next_ast_id += 1;
     }
 
-    // ----- lookups ------------------------------------------------------
+    // Lookups
 
     fn sun_pos(&self) -> Vec2 {
         vec2(screen_width() - 70.0, 70.0)
@@ -574,7 +571,7 @@ impl Game {
         Some(self.planets[gen_range(0, self.planets.len())].id)
     }
 
-    // ----- drawing ------------------------------------------------------
+    // Drawing
 
     fn draw(&self) {
         clear_background(Color::new(0.02, 0.02, 0.06, 1.0));
@@ -667,13 +664,14 @@ impl Game {
         // Explorer roster (bottom-left).
         let n = self.explorers.len();
         let y0 = screen_height() - 28.0 - n as f32 * 22.0;
-        draw_panel(12.0, y0 - 24.0, 300.0, 24.0 + n as f32 * 22.0 + 8.0);
+        draw_panel(12.0, y0 - 24.0, 340.0, 24.0 + n as f32 * 22.0 + 8.0);
         draw_text("Explorers", 24.0, y0 - 6.0, 20.0, WHITE);
         for (i, ev) in self.explorers.iter().enumerate() {
-            let here = self.orch.explorer_planet(ev.id).map_or("—".to_string(), |p| format!("#{p}"));
+            let here = self.orch.explorer_planet(ev.id).map_or("-".to_string(), |p| format!("#{p}"));
+            let name = self.orch.explorer_name(ev.id).unwrap_or("?");
             let (basics, diamonds) = self.bag_counts(ev.id);
             draw_text(
-                format!("#{} @ {here}   res:{basics}  💎:{diamonds}", ev.id),
+                format!("#{} {name} @ {here}   res:{basics}  dia:{diamonds}", ev.id),
                 24.0,
                 y0 + 18.0 + i as f32 * 22.0,
                 18.0,
@@ -681,7 +679,7 @@ impl Game {
             );
         }
 
-        let hint = "Space pause · M mode · click planet: stats · (Manual) S sunray  A asteroid · R restart · ESC quit";
+        let hint = "Space pause | M mode | click planet for stats | (Manual) S sunray, A asteroid | R restart | ESC quit";
         let w = measure_text(hint, None, 18, 1.0).width;
         draw_text(hint, screen_width() - w - 24.0, screen_height() - 16.0, 18.0, GRAY);
     }
@@ -693,7 +691,7 @@ impl Game {
         draw_panel(x, y, 270.0, 174.0);
         let name = self.orch.planet_name(id).unwrap_or("?");
         let ptype = self.orch.planet_type(id).unwrap_or("?");
-        draw_text(format!("#{id} · {name}"), x + 12.0, y + 26.0, 22.0, WHITE);
+        draw_text(format!("#{id} {name}"), x + 12.0, y + 26.0, 22.0, WHITE);
         draw_text(format!("Type {ptype} planet"), x + 12.0, y + 48.0, 18.0, GOLD);
         if let Some(state) = &self.selected_stats {
             draw_text(
@@ -747,7 +745,7 @@ impl Game {
     }
 }
 
-// ----- free drawing helpers --------------------------------------------
+// Free drawing helpers
 
 fn on_screen(p: Vec2) -> bool {
     p.x > -120.0 && p.x < screen_width() + 120.0 && p.y > -120.0 && p.y < screen_height() + 120.0

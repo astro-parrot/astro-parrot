@@ -1,9 +1,10 @@
-//! Orchestrator subsystem: galaxy topology, request/ack communication, the
-//! command-driven core, and the events it emits for the GUI.
+//! Orchestrator: galaxy topology, actor communication, planet/explorer
+//! factories, and the core that drives them.
 
 mod comm;
 mod core;
 mod events;
+mod explorer_factory;
 mod factory;
 mod galaxy;
 

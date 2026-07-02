@@ -1,15 +1,13 @@
-//! The orchestrator: spawns and drives planet and explorer threads.
+//! Spawns and drives the planet and explorer threads.
 //!
-//! Planets are driven with the request/ack pattern. Explorers are *polled*: once
-//! per cycle the orchestrator sends each explorer a `BagContentRequest`, which is
-//! the explorer's turn. During that turn the explorer may autonomously ask to
-//! move (`NeighborsRequest` / `TravelToPlanetRequest`), which the orchestrator
-//! services before the explorer finally answers with its bag.
+//! Planets answer request/ack calls. Each explorer is polled once per cycle with
+//! a BagContentRequest that acts as its turn; the explorer may reply with travel
+//! requests (handled here) before sending back its bag.
 
 use std::collections::HashMap;
 use std::thread::{self, JoinHandle};
 
-use astro_parrot::{AiExplorer, BagContent, Explorer};
+use astro_parrot::BagContent;
 use common_game::components::asteroid::Asteroid;
 use common_game::components::planet::DummyPlanetState;
 use common_game::components::sunray::Sunray;
@@ -23,6 +21,7 @@ use crossbeam_channel::{Sender, unbounded};
 
 use super::comm::{ExplorerComm, PlanetComm};
 use super::events::{EventBuffer, GuiEvent};
+use super::explorer_factory::{self, EXPLORER_ORDER, ExplorerKind};
 use super::factory::{self, PlanetKind};
 use super::galaxy::Galaxy;
 
@@ -40,6 +39,7 @@ struct ExplorerHandle {
     current_planet: ID,
     thread: JoinHandle<()>,
     tx_planet: Sender<PlanetToExplorer>,
+    name: &'static str,
 }
 
 /// A manual orchestrator action requested by the user, targeted at one planet.
@@ -128,8 +128,21 @@ impl Orchestrator {
         Ok(id)
     }
 
-    /// Spawns an explorer on `planet`, registers it there and starts its AI.
-    pub fn add_explorer(&mut self, planet: ID) -> Result<ID, String> {
+    /// Spawns one explorer of each kind, spreading them across the galaxy.
+    /// Returns each explorer id together with its home planet.
+    pub fn populate_explorers(&mut self, planet_ids: &[ID]) -> Result<Vec<(ID, ID)>, String> {
+        if planet_ids.is_empty() {
+            return Err("no planets to place explorers on".to_string());
+        }
+        let mut out = Vec::new();
+        for (k, &kind) in EXPLORER_ORDER.iter().enumerate() {
+            let home = planet_ids[k * planet_ids.len() / EXPLORER_ORDER.len()];
+            out.push((self.add_explorer(kind, home)?, home));
+        }
+        Ok(out)
+    }
+
+    fn add_explorer(&mut self, kind: ExplorerKind, planet: ID) -> Result<ID, String> {
         if !self.planets.contains_key(&planet) {
             return Err(format!("planet {planet} does not exist"));
         }
@@ -140,7 +153,8 @@ impl Orchestrator {
         let (p2e_tx, p2e_rx) = unbounded::<PlanetToExplorer>();
         let first_planet_tx = self.planets[&planet].tx_explorer.clone();
 
-        let mut explorer = AiExplorer::new(
+        let mut explorer = explorer_factory::make_explorer(
+            kind,
             id,
             planet,
             o2e_rx,
@@ -155,11 +169,7 @@ impl Orchestrator {
         self.explorer_comm.register(id, o2e_tx);
         self.explorers.insert(
             id,
-            ExplorerHandle {
-                current_planet: planet,
-                thread,
-                tx_planet: p2e_tx.clone(),
-            },
+            ExplorerHandle { current_planet: planet, thread, tx_planet: p2e_tx.clone(), name: kind.name() },
         );
 
         self.notify_incoming(id, planet, p2e_tx)?;
@@ -199,7 +209,7 @@ impl Orchestrator {
                 PlanetToOrchestratorKind::AsteroidAck,
             )?
             .into_asteroid_ack()
-            .unwrap() // safe: kind checked above
+            .unwrap()
             .1;
 
         if rocket.is_some() {
@@ -211,8 +221,8 @@ impl Orchestrator {
         }
     }
 
-    /// Gives every explorer a turn: it mines and may autonomously travel, then
-    /// reports its bag.
+    /// Runs one turn for every explorer, servicing any travel request and
+    /// storing the reported bag.
     pub fn poll_explorers(&mut self) -> Result<(), String> {
         let ids: Vec<ID> = self.explorers.keys().copied().collect();
         for explorer in ids {
@@ -279,7 +289,7 @@ impl Orchestrator {
         Ok(())
     }
 
-    // ----- queries ------------------------------------------------------
+    // Queries
 
     #[must_use]
     pub fn alive_planets(&self) -> Vec<ID> {
@@ -332,6 +342,11 @@ impl Orchestrator {
     }
 
     #[must_use]
+    pub fn explorer_name(&self, explorer: ID) -> Option<&'static str> {
+        self.explorers.get(&explorer).map(|h| h.name)
+    }
+
+    #[must_use]
     pub fn bag(&self, explorer: ID) -> Option<&BagContent> {
         self.bags.get(&explorer)
     }
@@ -340,7 +355,7 @@ impl Orchestrator {
         self.events.drain()
     }
 
-    // ----- internals ----------------------------------------------------
+    // Internals
 
     fn notify_incoming(
         &mut self,
@@ -359,7 +374,7 @@ impl Orchestrator {
                 PlanetToOrchestratorKind::IncomingExplorerResponse,
             )?
             .into_incoming_explorer_response()
-            .unwrap(); // safe: kind checked above
+            .unwrap();
         res.map_err(|e| format!("planet {planet} refused explorer {explorer}: {e}"))?;
         if accepted != explorer {
             return Err(format!(

@@ -1,4 +1,4 @@
-//! Semantic events emitted by the orchestrator for the GUI to animate.
+//! Events the orchestrator emits for the front-end to render.
 
 use common_game::utils::ID;
 

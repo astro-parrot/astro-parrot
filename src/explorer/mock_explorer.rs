@@ -1,10 +1,8 @@
-//! Default [`Explorer`] implementation.
+//! A straightforward resource miner.
 //!
-//! The explorer is *reactive*: it sits in a blocking loop waiting for the
-//! orchestrator. A [`OrchestratorToExplorer::BagContentRequest`] is treated as
-//! the explorer's "turn" — it mines its current planet and, every so often,
-//! autonomously asks the orchestrator to move to a neighbouring planet before
-//! reporting its bag. All other messages are handled as direct commands.
+//! It blocks on the orchestrator channel. A BagContentRequest is its turn: it
+//! mines the current planet's resources and, every few turns, asks to move to a
+//! neighbour. Other messages are handled as direct commands.
 
 use std::time::Duration;
 
