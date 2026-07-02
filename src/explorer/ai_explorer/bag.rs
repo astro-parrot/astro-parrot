@@ -1,9 +1,5 @@
-//! Typed inventory for the AI explorer.
-//!
-//! Unlike [`BagContent`](crate::explorer::BagContent), which only stores counts,
-//! the [`Bag`] keeps the real resource objects. They are needed to build a
-//! [`ComplexResourceRequest`](common_game::components::resource::ComplexResourceRequest)
-//! when crafting: the planet wants the actual ingredients, not just their number.
+// Inventory that holds the real resource objects (not just counts like
+// BagContent), because building a combine request needs the actual ingredients.
 
 use std::collections::HashMap;
 
@@ -13,7 +9,6 @@ use common_game::components::resource::{
 
 use crate::explorer::BagContent;
 
-/// The explorer's inventory, grouped by resource type.
 #[derive(Default)]
 pub struct Bag {
     basics: HashMap<BasicResourceType, Vec<BasicResource>>,
@@ -21,43 +16,36 @@ pub struct Bag {
 }
 
 impl Bag {
-    /// Stores a basic resource.
     pub fn add_basic(&mut self, resource: BasicResource) {
         self.basics.entry(resource.get_type()).or_default().push(resource);
     }
 
-    /// Stores a complex resource.
     pub fn add_complex(&mut self, resource: ComplexResource) {
         self.complex.entry(resource.get_type()).or_default().push(resource);
     }
 
-    /// Removes and returns one basic resource of the given type, if present.
     pub fn take_basic(&mut self, ty: BasicResourceType) -> Option<BasicResource> {
         self.basics.get_mut(&ty)?.pop()
     }
 
-    /// Removes and returns one complex resource of the given type, if present.
     pub fn take_complex(&mut self, ty: ComplexResourceType) -> Option<ComplexResource> {
         self.complex.get_mut(&ty)?.pop()
     }
 
-    /// How many basic resources of `ty` are in the bag.
     pub fn count_basic(&self, ty: BasicResourceType) -> usize {
         self.basics.get(&ty).map_or(0, Vec::len)
     }
 
-    /// How many complex resources of `ty` are in the bag.
     pub fn count_complex(&self, ty: ComplexResourceType) -> usize {
         self.complex.get(&ty).map_or(0, Vec::len)
     }
 
-    /// Empties the bag.
     pub fn clear(&mut self) {
         self.basics.clear();
         self.complex.clear();
     }
 
-    /// Produces the count-only [`BagContent`] view sent back to the orchestrator.
+    // Count-only view reported back to the orchestrator.
     pub fn to_content(&self) -> BagContent {
         let mut content = BagContent::default();
         for (&ty, items) in &self.basics {

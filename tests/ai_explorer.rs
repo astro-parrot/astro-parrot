@@ -1,12 +1,6 @@
-//! End-to-end test of the autonomous `AiExplorer`.
-//!
-//! A real AstroParrot planet (generates Carbon, combines Diamond) runs in one
-//! thread, the explorer in another, and the test plays a minimal **turn-based**
-//! orchestrator that mirrors `Orchestrator::poll_explorers`: each turn it sends
-//! the explorer a `BagContentRequest`, answers its `NeighborsRequest` /
-//! `TravelToPlanetRequest`, and ends the turn when the explorer reports its bag.
-//! With no command other than `StartExplorerAI`, the explorer must explore, mine
-//! Carbon and craft a Diamond on its own.
+// End-to-end tests: real planets + the explorer, driven by a small turn-based
+// orchestrator that mirrors Orchestrator::poll_explorers (a BagContentRequest is
+// the explorer's turn; it answers neighbour/travel requests in between).
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -134,14 +128,13 @@ fn ai_explorer_explores_collects_and_crafts() {
     assert!(crafted, "the AI explorer should have autonomously crafted a Diamond");
 }
 
-/// Charges a planet once and drains the ack.
+// Charge a planet once and drain the ack.
 fn pump_sunray(o2p: &Sender<OrchestratorToPlanet>, p2o: &Receiver<PlanetToOrchestrator>) {
     let _ = o2p.send(OrchestratorToPlanet::Sunray(Sunray::default()));
     let _ = p2o.recv_timeout(ACK);
 }
 
-/// Performs the planet/explorer handoff for a move, mirroring the real
-/// `Orchestrator::handle_travel_request`.
+// The planet/explorer handoff on a move, like Orchestrator::handle_travel_request.
 #[allow(clippy::too_many_arguments)]
 fn handoff(
     eid: u32,
@@ -169,8 +162,8 @@ fn handoff(
     let _ = e2o_rx.recv_timeout(ACK); // MovedToPlanetResult
 }
 
-/// Two connected planets: the explorer must travel between them while exploring,
-/// then still complete its task (craft a Diamond).
+// Two connected planets: the explorer travels between them while exploring and
+// still crafts a Diamond.
 #[test]
 fn ai_explorer_travels_between_planets() {
     let eid = 9u32;
@@ -303,8 +296,8 @@ fn ai_explorer_travels_between_planets() {
     );
 }
 
-/// Robustness: a planet appears *after* the explorer has finished its first
-/// sweep. The explorer must notice it (re-scan while idle) and travel there.
+// A planet shows up after the first sweep; the idle explorer should re-scan,
+// find it, and travel there.
 #[test]
 fn ai_explorer_rescans_for_new_planets() {
     let eid = 11u32;
@@ -447,8 +440,8 @@ fn ai_explorer_rescans_for_new_planets() {
     assert!(travelled, "explorer should re-scan and travel to the newly appeared planet");
 }
 
-/// Robustness: the explorer ends exploration on an energy-starved planet and
-/// must fall back to a charged one to actually collect and craft.
+// Exploration ends on a starved planet, so the explorer must fall back to a
+// charged one to collect and craft.
 #[test]
 fn ai_explorer_falls_back_to_a_charged_planet() {
     let eid = 13u32;

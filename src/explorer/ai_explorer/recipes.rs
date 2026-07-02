@@ -1,8 +1,5 @@
-//! The static crafting tree shared by every planet in the game.
-//!
-//! These functions encode the recipes defined by `common-game` so the explorer
-//! can reason about *what* it needs (the shopping list of basics, the order in
-//! which to craft intermediates) independently of *which* planet can make it.
+// The crafting tree from common-game, plus the goal the explorer picks. Kept
+// separate from the strategy so it can be reasoned about (and tested) on its own.
 
 use std::collections::{HashMap, HashSet};
 
@@ -12,31 +9,25 @@ use common_game::components::resource::{
 
 use super::bag::Bag;
 
-/// The explorer's heart's desire, in order of preference. It dreams of a harem
-/// of AI girlfriends; if the galaxy cannot support true artificial love, it
-/// settles for ever-less-romantic company.
+// What the explorer wants, in order of preference: a harem of AI girlfriends,
+// then progressively less exciting company.
 pub const WISHLIST: [(C, usize); 4] = [
-    (C::AIPartner, 10), // a harem of 10 AI girlfriends 💕
-    (C::Dolphin, 10),   // at least the dolphins love me 🐬
-    (C::Robot, 10),     // mechanical companionship 🤖
-    (C::Diamond, 25),   // retail therapy 💎
+    (C::AIPartner, 10),
+    (C::Dolphin, 10),
+    (C::Robot, 10),
+    (C::Diamond, 25),
 ];
 
-/// Picks the most-preferred goal the galaxy can actually craft, as `(resource,
-/// how many)`. Returns `None` when the galaxy can satisfy none of the wishlist
-/// (the explorer is, tragically, forever alone).
+// The most-wanted resource the galaxy can actually make, or None if it can make
+// none of them.
 pub fn pick_goal(feasible: &HashSet<C>) -> Option<(C, usize)> {
     WISHLIST.into_iter().find(|(c, _)| feasible.contains(c))
 }
 
-/// Given the basic resources at least one alive planet can generate and the
-/// complex combinations available somewhere in the galaxy, returns every complex
-/// resource that can *actually* be crafted.
-///
-/// This is the closure (fixed-point) of the recipe graph: a complex resource is
-/// craftable when some planet combines it and every one of its ingredients is
-/// either an available basic or itself craftable. Repeating until the set stops
-/// growing lets craftable intermediates unlock the resources that need them.
+// Which complex resources can actually be crafted, given the basics some planet
+// generates and the combinations available anywhere. Fixed-point: keep adding
+// craftable resources until nothing new becomes reachable, so a craftable
+// intermediate can unlock the things that need it.
 pub fn feasible_complex(
     available_basics: &HashSet<B>,
     available_combinations: &HashSet<C>,
@@ -63,7 +54,7 @@ pub fn feasible_complex(
     craftable
 }
 
-/// The direct ingredients of a complex resource: `(basics, complex)`.
+// Direct ingredients of a complex resource: (basics, complex).
 pub fn ingredients(ty: C) -> (Vec<B>, Vec<C>) {
     match ty {
         C::Diamond => (vec![B::Carbon, B::Carbon], vec![]),
@@ -75,7 +66,7 @@ pub fn ingredients(ty: C) -> (Vec<B>, Vec<C>) {
     }
 }
 
-/// Crafting depth, used to order crafts so dependencies are built first.
+// Depth in the crafting tree, used to craft dependencies before their consumers.
 pub fn tier(ty: C) -> u8 {
     match ty {
         C::Diamond | C::Water => 1,
@@ -85,7 +76,7 @@ pub fn tier(ty: C) -> u8 {
     }
 }
 
-/// Recursively accumulates the basic resources required to build `count` of `ty`.
+// Total basics needed to build `count` of `ty`, recursively.
 pub fn basic_cost(ty: C, count: usize, acc: &mut HashMap<B, usize>) {
     let (basics, complex) = ingredients(ty);
     for b in basics {
@@ -96,8 +87,8 @@ pub fn basic_cost(ty: C, count: usize, acc: &mut HashMap<B, usize>) {
     }
 }
 
-/// Recursively accumulates the complex resources that must be *produced* to end
-/// up with `count` of `ty` — including every intermediate consumed along the way.
+// Every complex resource that must be produced to end up with `count` of `ty`,
+// intermediates included.
 pub fn complex_production(ty: C, count: usize, acc: &mut HashMap<C, usize>) {
     *acc.entry(ty).or_default() += count;
     let (_, complex) = ingredients(ty);
@@ -106,10 +97,8 @@ pub fn complex_production(ty: C, count: usize, acc: &mut HashMap<C, usize>) {
     }
 }
 
-/// Pulls the ingredients for one `ty` out of the bag and assembles the request.
-///
-/// On a partial match (first ingredient present, second missing) the first one
-/// is returned to the bag, so nothing is lost.
+// Takes the ingredients for `ty` out of the bag and builds the request. If the
+// second ingredient is missing, the first is put back.
 pub fn build_request(bag: &mut Bag, ty: C) -> Option<Req> {
     match ty {
         C::Diamond => {
@@ -212,39 +201,35 @@ mod tests {
     #[test]
     fn build_request_recovers_partial_ingredients() {
         let mut bag = Bag::default();
-        bag.add_basic(carbon()); // only one Carbon: not enough for a Diamond
+        bag.add_basic(carbon());
         assert!(build_request(&mut bag, C::Diamond).is_none());
-        assert_eq!(bag.count_basic(B::Carbon), 1, "the lone Carbon must be returned");
+        assert_eq!(bag.count_basic(B::Carbon), 1);
     }
 
     #[test]
     fn feasible_excludes_targets_with_missing_basics() {
-        // Astro-parrot planets: only Carbon, combine Diamond and AIPartner.
-        // AIPartner needs Silicon (via Robot), which nobody can generate.
+        // Only Carbon available: AIPartner needs Silicon, so it's out.
         let basics = HashSet::from([B::Carbon]);
         let combos = HashSet::from([C::Diamond, C::AIPartner]);
         let feasible = feasible_complex(&basics, &combos);
         assert!(feasible.contains(&C::Diamond));
-        assert!(!feasible.contains(&C::AIPartner), "AIPartner needs Silicon: impossible");
+        assert!(!feasible.contains(&C::AIPartner));
     }
 
     #[test]
     fn feasible_unlocks_through_intermediates() {
-        // With every basic and every combination, the whole tree is craftable.
         let basics = HashSet::from([B::Carbon, B::Hydrogen, B::Oxygen, B::Silicon]);
         let combos =
             HashSet::from([C::Water, C::Diamond, C::Life, C::Robot, C::Dolphin, C::AIPartner]);
-        let feasible = feasible_complex(&basics, &combos);
-        assert_eq!(feasible.len(), 6, "everything should be craftable");
+        assert_eq!(feasible_complex(&basics, &combos).len(), 6);
     }
 
     #[test]
     fn feasible_blocks_intermediate_not_combinable_anywhere() {
-        // Life needs Water, but no planet combines Water -> Life is impossible.
+        // Life needs Water, but no planet combines Water.
         let basics = HashSet::from([B::Carbon, B::Hydrogen, B::Oxygen]);
-        let combos = HashSet::from([C::Life]); // Water not combinable here
-        let feasible = feasible_complex(&basics, &combos);
-        assert!(feasible.is_empty(), "Life is unreachable without a Water recipe");
+        let combos = HashSet::from([C::Life]);
+        assert!(feasible_complex(&basics, &combos).is_empty());
     }
 
     #[test]
@@ -255,18 +240,14 @@ mod tests {
 
     #[test]
     fn pick_goal_settles_for_the_best_available() {
-        // No AIPartner: settle for dolphins.
         let feasible = HashSet::from([C::Dolphin, C::Robot, C::Diamond]);
         assert_eq!(pick_goal(&feasible), Some((C::Dolphin, 10)));
-        // Only diamonds left: retail therapy.
-        let feasible = HashSet::from([C::Diamond]);
-        assert_eq!(pick_goal(&feasible), Some((C::Diamond, 25)));
+        assert_eq!(pick_goal(&HashSet::from([C::Diamond])), Some((C::Diamond, 25)));
     }
 
     #[test]
-    fn pick_goal_is_none_when_forever_alone() {
+    fn pick_goal_is_none_when_nothing_wanted_is_craftable() {
         assert_eq!(pick_goal(&HashSet::new()), None);
-        // Water is craftable but not something the explorer yearns for.
         assert_eq!(pick_goal(&HashSet::from([C::Water])), None);
     }
 }

@@ -1,9 +1,5 @@
-//! The autonomous brain: the three-phase strategy and its supporting logic.
-//!
-//! [`AiExplorer::advance`] performs one unit of work per call and is driven by
-//! the main loop in [`super`]. Each phase makes at most one network action
-//! (query / move / generate / combine) per step, so the explorer stays
-//! responsive to the orchestrator between actions.
+// The strategy: explore -> collect -> craft. advance() does one step per turn
+// (at most one query/move/generate/combine) so the explorer stays responsive.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -21,14 +17,12 @@ use super::knowledge::StrategyState;
 use super::recipes;
 
 impl AiExplorer {
-    /// Performs one unit of autonomous work, then returns to the main loop.
     pub(super) fn advance(&mut self) {
         self.drain_orchestrator();
         if !self.alive || !self.running {
             return;
         }
-        // Outside exploration, make sure we know the planet we're standing on
-        // (e.g. after the orchestrator pushed us somewhere new).
+        // If we were moved somewhere new, learn it before using it.
         if self.state != StrategyState::Exploring && !self.knowledge.is_visited(self.current_planet) {
             self.query_planet(self.current_planet);
             return;
@@ -41,10 +35,8 @@ impl AiExplorer {
         }
     }
 
-    /// While idle, keep watching for planets added to the galaxy after the first
-    /// sweep. If a newly reachable planet appears, resume exploring — and give
-    /// previously-impossible resources another chance, since the new planet may
-    /// be able to provide them.
+    // Once done, keep an eye out for planets added after the first sweep; if one
+    // shows up, go explore it (and retry resources that were impossible before).
     fn maybe_rescan(&mut self) {
         let current = self.current_planet;
         self.send_orchestrator(ExplorerToOrchestrator::NeighborsRequest {
@@ -63,10 +55,6 @@ impl AiExplorer {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Phase 1: exploration
-    // ------------------------------------------------------------------
-
     fn explore_step(&mut self) {
         let current = self.current_planet;
         if !self.knowledge.is_visited(current) {
@@ -83,8 +71,7 @@ impl AiExplorer {
         }
     }
 
-    /// Queries one planet's neighbours (from the orchestrator) and its
-    /// capabilities and energy (from the planet), then marks it visited.
+    // Neighbours come from the orchestrator, capabilities and energy from the planet.
     fn query_planet(&mut self, id: ID) {
         self.send_orchestrator(ExplorerToOrchestrator::NeighborsRequest {
             explorer_id: self.id,
@@ -120,7 +107,7 @@ impl AiExplorer {
         self.knowledge.entry(id).visited = true;
     }
 
-    /// Asks the orchestrator to move to `dst`. Returns `true` once arrived.
+    // Ask the orchestrator to move us; true once we've arrived.
     fn travel_to(&mut self, dst: ID) -> bool {
         if dst == self.current_planet {
             return true;
@@ -142,19 +129,18 @@ impl AiExplorer {
                 true
             }
             Some(OrchestratorToExplorer::MoveToPlanet { sender_to_new_planet: None, .. }) => {
-                // Move refused: acknowledge with our unchanged location.
+                // Refused; ack with our unchanged location.
                 self.send_orchestrator(ExplorerToOrchestrator::MovedToPlanetResult {
                     explorer_id: self.id,
                     planet_id: self.current_planet,
                 });
                 false
             }
-            _ => false, // timeout
+            _ => false,
         }
     }
 
-    /// Breadth-first search over known planets for the first hop toward the
-    /// nearest planet whose capabilities we have not yet recorded.
+    // BFS over known planets for the first hop toward the nearest unvisited one.
     fn next_unvisited(&self) -> Option<ID> {
         let mut queue = VecDeque::new();
         let mut seen = HashSet::new();
@@ -166,7 +152,7 @@ impl AiExplorer {
             let Some(pk) = self.knowledge.get(cur) else { continue };
             for &nb in &pk.neighbors {
                 if self.knowledge.is_dead(nb) {
-                    continue; // never route through or to a destroyed planet
+                    continue;
                 }
                 if !self.knowledge.is_visited(nb) && !self.unreachable.contains(&nb) {
                     return Some(self.first_hop(cur, nb, &parent));
@@ -180,8 +166,6 @@ impl AiExplorer {
         None
     }
 
-    /// Reconstructs the first hop on the BFS path from the current planet to the
-    /// planet `nb` discovered as a neighbour of `cur`.
     fn first_hop(&self, cur: ID, nb: ID, parent: &HashMap<ID, ID>) -> ID {
         if cur == self.current_planet {
             return nb;
@@ -196,10 +180,8 @@ impl AiExplorer {
         nb
     }
 
-    /// Exploration finished: pick a task (if adaptive) and start collecting.
     fn finish_exploration(&mut self) {
         if self.adaptive && self.task.is_empty() {
-            // Union of what the alive planets can generate and combine.
             let mut basics: HashSet<B> = HashSet::new();
             let mut combinations: HashSet<ComplexResourceType> = HashSet::new();
             for planet in self.knowledge.planets.values() {
@@ -209,9 +191,8 @@ impl AiExplorer {
                 basics.extend(&planet.basics);
                 combinations.extend(&planet.combinations);
             }
-            // Of everything the galaxy can actually craft (recipe-graph closure),
-            // pursue the explorer's heart's desire: a harem of AI girlfriends, or
-            // the best available consolation.
+            // Aim only for what's actually craftable, so we don't gather basics
+            // for an impossible goal.
             let feasible = recipes::feasible_complex(&basics, &combinations);
             if let Some((resource, count)) = recipes::pick_goal(&feasible) {
                 self.task.insert(ResourceType::Complex(resource), count);
@@ -220,10 +201,6 @@ impl AiExplorer {
         self.state = StrategyState::Collecting;
         self.stall = 0;
     }
-
-    // ------------------------------------------------------------------
-    // Phase 2: collecting basics
-    // ------------------------------------------------------------------
 
     fn collect_step(&mut self) {
         let needs = self.basic_needs();
@@ -237,7 +214,6 @@ impl AiExplorer {
             }
             let planets = self.planets_generating(ty);
             if planets.is_empty() {
-                // No known planet can make it — stop chasing it.
                 self.unobtainable.insert(ResourceType::Basic(ty));
                 continue;
             }
@@ -248,15 +224,14 @@ impl AiExplorer {
                 return;
             }
             if self.generate_basic(ty) {
-                self.depleted.clear(); // energy is flowing again
+                self.depleted.clear();
                 self.stall = 0;
             } else {
-                self.depleted.insert(self.current_planet); // dry: try elsewhere next
+                self.depleted.insert(self.current_planet);
                 self.bump_stall_collect();
             }
             return;
         }
-        // Everything still needed is unobtainable; craft what we can.
         self.enter_crafting();
     }
 
@@ -272,7 +247,7 @@ impl AiExplorer {
         }
     }
 
-    /// The basic resources still missing from the bag to satisfy the whole task.
+    // Basics still missing from the bag to satisfy the whole task.
     fn basic_needs(&self) -> HashMap<B, usize> {
         let mut need: HashMap<B, usize> = HashMap::new();
         for (rt, &count) in &self.task {
@@ -291,17 +266,13 @@ impl AiExplorer {
         still
     }
 
-    // ------------------------------------------------------------------
-    // Phase 3: crafting
-    // ------------------------------------------------------------------
-
     fn craft_step(&mut self) {
         let targets = self.complex_targets();
         if targets.is_empty() || self.all_targets_met(&targets) {
             self.state = StrategyState::Done;
             return;
         }
-        // Craft lowest-tier resources first so intermediates exist when needed.
+        // Lowest tier first, so intermediates exist when a higher one needs them.
         let mut ordered: Vec<ComplexResourceType> = targets.keys().copied().collect();
         ordered.sort_by_key(|t| recipes::tier(*t));
 
@@ -318,7 +289,7 @@ impl AiExplorer {
                 continue;
             }
             if !self.has_ingredients(ty) {
-                continue; // try a different target this pass
+                continue;
             }
             let Some(dst) = self.choose_planet(&planets) else { continue };
             if self.current_planet != dst && !self.travel_to(dst) {
@@ -327,23 +298,21 @@ impl AiExplorer {
                 return;
             }
             if self.combine(ty) {
-                self.depleted.clear(); // energy is flowing again
+                self.depleted.clear();
                 *self.produced.entry(ty).or_default() += 1;
                 self.stall = 0;
             } else {
-                self.depleted.insert(self.current_planet); // dry: try elsewhere next
+                self.depleted.insert(self.current_planet);
                 self.bump_stall_craft();
             }
             return;
         }
-        // Nothing craftable this pass (missing ingredients or all unobtainable).
         self.bump_stall_craft();
     }
 
     fn combine(&mut self, ty: ComplexResourceType) -> bool {
-        // A planet with no charged cell silently *discards* the ingredients of a
-        // combine request instead of answering, so the resources would be lost.
-        // Only hand them over once we have confirmed the planet has energy.
+        // A planet with no charged cell silently drops the ingredients instead of
+        // answering, so only hand them over once we know it has energy.
         if !self.planet_has_energy() {
             return false;
         }
@@ -361,19 +330,15 @@ impl AiExplorer {
                 self.recover(g2);
                 false
             }
-            // Timeout despite confirmed energy: the planet died in between. The
-            // ingredients handed over are lost for this attempt.
             _ => false,
         }
     }
 
-    /// Whether the current planet has at least one charged cell (live check).
     fn planet_has_energy(&mut self) -> bool {
         self.current_energy() >= 1
     }
 
-    /// Queries the current planet's live charged-cell count and refreshes the
-    /// stored estimate for it, so planet selection works on fresh data.
+    // Live energy of the current planet; also refreshes the stored estimate.
     fn current_energy(&mut self) -> ID {
         self.send_planet(ExplorerToPlanet::AvailableEnergyCellRequest { explorer_id: self.id });
         let cells = match self.await_planet(super::PLANET_TIMEOUT) {
@@ -384,8 +349,7 @@ impl AiExplorer {
         cells
     }
 
-    /// All complex resources that must be produced for the task, intermediates
-    /// included.
+    // All complex resources to produce for the task, intermediates included.
     fn complex_targets(&self) -> HashMap<ComplexResourceType, usize> {
         let mut acc = HashMap::new();
         for (rt, &count) in &self.task {
@@ -402,7 +366,6 @@ impl AiExplorer {
             .all(|(ty, &n)| self.produced.get(ty).copied().unwrap_or(0) >= n)
     }
 
-    /// Whether the bag currently holds the direct ingredients to craft one `ty`.
     fn has_ingredients(&self, ty: ComplexResourceType) -> bool {
         let (basics, complex) = recipes::ingredients(ty);
         let mut need_b: HashMap<B, usize> = HashMap::new();
@@ -416,10 +379,6 @@ impl AiExplorer {
         need_b.iter().all(|(b, &n)| self.bag.count_basic(*b) >= n)
             && need_c.iter().all(|(c, &n)| self.bag.count_complex(*c) >= n)
     }
-
-    // ------------------------------------------------------------------
-    // Shared helpers
-    // ------------------------------------------------------------------
 
     fn planets_generating(&self, ty: B) -> Vec<ID> {
         self.knowledge
@@ -439,14 +398,9 @@ impl AiExplorer {
             .collect()
     }
 
-    /// Chooses where to work on a resource, energy-aware.
-    ///
-    /// Staying put is preferred whenever the current planet still has energy: it
-    /// is the one candidate we can probe live (no travel), and avoids chasing
-    /// possibly-stale estimates of far planets. Otherwise the candidate with the
-    /// most recently-known charged cells is chosen, skipping planets that just
-    /// ran out of energy (ties prefer the current planet). If every candidate is
-    /// depleted, the depletion is forgotten — they have had time to recharge.
+    // Stay put if the current planet still has energy (cheap to check, no
+    // travel); otherwise go to the candidate with the most known charged cells,
+    // skipping dry ones. If all are dry, forget that and let them recharge.
     fn choose_planet(&mut self, candidates: &[ID]) -> Option<ID> {
         if candidates.is_empty() {
             return None;

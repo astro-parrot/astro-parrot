@@ -1,21 +1,8 @@
-//! Autonomous [`Explorer`] implementation.
-//!
-//! Once started with [`OrchestratorToExplorer::StartExplorerAI`], the
-//! `AiExplorer` drives itself through three phases:
-//!
-//! 1. **Exploring** — visit the reachable planets and record, for each, its
-//!    neighbours, the basic resources it can generate, and the complex resources
-//!    it can combine.
-//! 2. **Collecting** — gather the basic resources its task requires.
-//! 3. **Crafting** — combine them into the target complex resources, building
-//!    any intermediate products first.
-//!
-//! It follows the `common-game` autonomous protocol: it asks the orchestrator
-//! for neighbours ([`ExplorerToOrchestrator::NeighborsRequest`]) and to be moved
-//! ([`ExplorerToOrchestrator::TravelToPlanetRequest`]). Every wait has a timeout
-//! and stays responsive to orchestrator control messages, so a silent
-//! orchestrator can never deadlock the explorer — it just stops making progress
-//! and keeps answering commands.
+// Autonomous explorer. Once started it drives itself: explore the galaxy,
+// collect the basics its goal needs, craft the target complex resources. It
+// talks to the orchestrator (neighbours / travel) and the planets (query /
+// generate / combine) over the common-game protocol. Every wait has a timeout,
+// so a silent orchestrator or planet slows it down but never deadlocks it.
 
 mod ai;
 mod bag;
@@ -37,14 +24,11 @@ use super::{BagContent, Explorer};
 use bag::Bag;
 use knowledge::{ExplorerKnowledge, StrategyState};
 
-/// How long to wait for a planet's reply during an autonomous action.
 const PLANET_TIMEOUT: Duration = Duration::from_millis(300);
-/// How long to wait for an orchestrator reply (neighbours / move).
 const ORCH_TIMEOUT: Duration = Duration::from_millis(300);
-/// Consecutive no-progress turns after which a phase gives up and moves on.
+// Give up on a phase after this many turns without progress.
 const MAX_STALL: u32 = 40;
 
-/// One message received from either of the explorer's two inbound channels.
 enum Incoming {
     Orchestrator(OrchestratorToExplorer),
     Planet(PlanetToExplorer),
@@ -64,30 +48,22 @@ pub struct AiExplorer {
     bag: Bag,
     knowledge: ExplorerKnowledge,
 
-    /// What the explorer is trying to obtain. Built adaptively after exploration
-    /// when [`adaptive`](Self::adaptive) is set and no task was provided.
     task: HashMap<ResourceType, usize>,
-    /// If true and the task is empty, after exploring the explorer aims to craft
-    /// one of every complex resource discovered anywhere in the galaxy.
+    // When set and no task was given, pick a goal after exploring.
     adaptive: bool,
 
     state: StrategyState,
-    /// How many of each complex resource have been crafted so far this run.
+    // Complex resources crafted so far this run.
     produced: HashMap<ComplexResourceType, usize>,
-    /// Planets a move request has failed for (avoid retrying them this run).
+    // Planets we failed to move to; resources no planet can provide.
     unreachable: HashSet<ID>,
-    /// Resources no known planet can provide (avoid chasing them forever).
     unobtainable: HashSet<ResourceType>,
-    /// Planets that just ran out of energy: try a different one before coming
-    /// back. Cleared on any success or once every candidate is depleted.
+    // Planets currently out of energy; try elsewhere before coming back.
     depleted: HashSet<ID>,
-    /// Consecutive no-progress steps in the current phase.
     stall: u32,
 
-    /// Whether the autonomous AI is active (toggled by Start/Stop).
-    running: bool,
-    /// Whether the explorer thread should keep living (cleared by Kill).
-    alive: bool,
+    running: bool, // AI active (Start/Stop)
+    alive: bool,   // thread should live (cleared by Kill)
 }
 
 impl Explorer for AiExplorer {
@@ -123,11 +99,9 @@ impl Explorer for AiExplorer {
 
     fn run(&mut self) -> Result<(), String> {
         self.knowledge.entry(self.current_planet);
-        // Turn-based driving: the orchestrator gives the explorer a turn by
-        // sending a `BagContentRequest`. On its turn the explorer performs one
-        // autonomous step — which may query/move through the orchestrator and
-        // generate/craft directly with the planet — and ends the turn by
-        // reporting its bag. Every other message is handled as it arrives.
+        // The orchestrator polls each explorer with a BagContentRequest, which is
+        // that explorer's turn: do one step of work, then report the bag. Other
+        // messages are handled as they arrive.
         while self.alive {
             match self.rx_orchestrator.recv() {
                 Ok(OrchestratorToExplorer::BagContentRequest) => {
@@ -140,7 +114,7 @@ impl Explorer for AiExplorer {
                     });
                 }
                 Ok(msg) => self.handle_orchestrator(msg),
-                Err(_) => break, // orchestrator gone
+                Err(_) => break,
             }
         }
         Ok(())
@@ -148,13 +122,8 @@ impl Explorer for AiExplorer {
 }
 
 impl AiExplorer {
-    // ------------------------------------------------------------------
-    // Orchestrator message handling
-    // ------------------------------------------------------------------
-
-    /// Handles a single orchestrator message. Control messages mutate the
-    /// explorer's lifecycle; "manual mode" requests round-trip to the planet so
-    /// the GUI keeps working even while the AI is active.
+    // Control messages drive the lifecycle; the manual-mode requests round-trip
+    // to the planet so the GUI still works while the AI is running.
     fn handle_orchestrator(&mut self, msg: OrchestratorToExplorer) {
         match msg {
             OrchestratorToExplorer::StartExplorerAI => {
@@ -196,7 +165,7 @@ impl AiExplorer {
                 });
             }
             OrchestratorToExplorer::MoveToPlanet { sender_to_new_planet, planet_id } => {
-                // A move pushed by the orchestrator (manual mode or relocation).
+                // Move pushed by the orchestrator (manual mode or relocation).
                 if let Some(tx) = sender_to_new_planet {
                     self.tx_planet = tx;
                     self.current_planet = planet_id;
@@ -208,7 +177,6 @@ impl AiExplorer {
                 });
             }
             OrchestratorToExplorer::NeighborsResponse { neighbors } => {
-                // Unsolicited neighbour info (the solicited path is in `ai.rs`).
                 self.knowledge.entry(self.current_planet).neighbors = neighbors.into_iter().collect();
             }
             OrchestratorToExplorer::SupportedResourceRequest => {
@@ -270,8 +238,6 @@ impl AiExplorer {
         }
     }
 
-    /// Manual-mode crafting: build the request from the bag, round-trip to the
-    /// planet, and recover ingredients on failure.
     fn manual_combine(&mut self, ty: ComplexResourceType) -> Result<(), String> {
         let Some(req) = recipes::build_request(&mut self.bag, ty) else {
             return Err(format!("missing ingredients to craft {ty:?}"));
@@ -290,11 +256,6 @@ impl AiExplorer {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Low-level communication
-    // ------------------------------------------------------------------
-
-    /// Drains every orchestrator message currently queued, without blocking.
     fn drain_orchestrator(&mut self) {
         while let Ok(msg) = self.rx_orchestrator.try_recv() {
             self.handle_orchestrator(msg);
@@ -304,7 +265,6 @@ impl AiExplorer {
         }
     }
 
-    /// Receives from either inbound channel, or returns [`Incoming::Timeout`].
     fn recv_any(&self, timeout: Duration) -> Incoming {
         select! {
             recv(self.rx_orchestrator) -> m => match m {
@@ -319,8 +279,7 @@ impl AiExplorer {
         }
     }
 
-    /// Waits for the next planet reply, staying responsive to the orchestrator.
-    /// Returns `None` on timeout or if a channel closes.
+    // Wait for a planet reply, but keep answering the orchestrator meanwhile.
     fn await_planet(&mut self, timeout: Duration) -> Option<PlanetToExplorer> {
         let deadline = Instant::now() + timeout;
         loop {
@@ -332,9 +291,7 @@ impl AiExplorer {
                 return None;
             }
             match self.recv_any(remaining) {
-                // A stopped planet only ever answers with `Stopped`: the planet
-                // we are talking to has been destroyed, so remember that and
-                // treat the request as unanswered.
+                // A stopped planet only answers `Stopped`: it's been destroyed.
                 Incoming::Planet(PlanetToExplorer::Stopped) => {
                     self.knowledge.mark_dead(self.current_planet);
                     return None;
@@ -350,8 +307,7 @@ impl AiExplorer {
         }
     }
 
-    /// Waits for a specific orchestrator reply, handling any other orchestrator
-    /// message in the meantime. Returns `None` on timeout.
+    // Wait for a specific orchestrator reply, handling anything else in between.
     fn await_orchestrator(
         &mut self,
         kind: OrchestratorToExplorerKind,
@@ -373,7 +329,7 @@ impl AiExplorer {
                     }
                     self.handle_orchestrator(msg);
                 }
-                Incoming::Planet(_) => {} // stray planet reply: drop it
+                Incoming::Planet(_) => {}
                 Incoming::OrchestratorClosed => {
                     self.alive = false;
                     return None;
@@ -383,7 +339,7 @@ impl AiExplorer {
         }
     }
 
-    /// Blocking round-trip to the current planet (used by manual-mode handlers).
+    // Blocking round-trip used by the manual-mode handlers.
     fn planet_roundtrip(&self, msg: ExplorerToPlanet) -> Option<PlanetToExplorer> {
         self.tx_planet.send(msg).ok()?;
         self.rx_planet.recv_timeout(PLANET_TIMEOUT).ok()
@@ -401,7 +357,7 @@ impl AiExplorer {
         let _ = self.tx_planet.send(msg);
     }
 
-    /// Puts a recovered ingredient back into the bag after a failed craft.
+    // Put an ingredient back after a failed craft.
     fn recover(&mut self, resource: GenericResource) {
         match resource {
             GenericResource::BasicResources(b) => self.bag.add_basic(b),
