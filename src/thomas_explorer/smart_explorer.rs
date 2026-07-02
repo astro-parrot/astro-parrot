@@ -1,20 +1,11 @@
-//! Autonomous [`Explorer`] implementation: an *obsessive Diamond collector*.
+//! Autonomous explorer: an obsessive Diamond collector.
 //!
-//! This explorer cares about exactly one thing — Diamonds — and ignores every
-//! other resource in the galaxy. On each turn (an
-//! [`OrchestratorToExplorer::BagContentRequest`]) it:
+//! Each turn it makes one move toward a Diamond — mine a Carbon, or fuse two
+//! Carbons (Diamond = Carbon + Carbon). If the planet can't help, it travels on.
+//! After `TARGET_DIAMONDS` Diamonds it stops crafting and just roams.
 //!
-//! 1. discovers what the current planet can do (cached until it travels);
-//! 2. makes a single step toward a Diamond: mine a Carbon, or fuse two Carbons
-//!    into a Diamond (a Diamond's recipe is Carbon + Carbon);
-//! 3. travels to a neighbouring planet when this one cannot help its obsession;
-//! 4. once it owns [`TARGET_DIAMONDS`] Diamonds it stops collecting entirely and
-//!    just roams the galaxy admiring its hoard ("museum mode").
-//!
-//! It also answers the orchestrator's manual commands, so it works in the
-//! orchestrator's "manual" mode too. It never panics: channel errors and
-//! timeouts degrade gracefully into "do nothing this turn", which lets it
-//! survive unresponsive planets and a shrinking galaxy.
+//! It also answers the orchestrator's manual commands and never panics: channel
+//! errors and timeouts just mean "do nothing this turn".
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -30,23 +21,19 @@ use crossbeam_channel::{Receiver, Sender};
 
 use super::{BagContent, Explorer};
 
-/// How long to wait for a planet to answer a request.
+/// Max wait for a planet reply.
 const PLANET_TIMEOUT: Duration = Duration::from_millis(200);
-/// How long to wait for the orchestrator during the travel handshake.
+/// Max wait for the orchestrator during a travel handshake.
 const ORCH_TIMEOUT: Duration = Duration::from_millis(500);
-/// The obsession: collect exactly this many Diamonds, then enter "museum mode".
+/// Diamonds to collect before going idle.
 const TARGET_DIAMONDS: usize = 5;
 
-/// What the collector decides to do on a single turn. Kept separate from the
-/// action itself so the decision logic stays pure and easy to unit-test.
+/// This turn's move. Split from the action so `decide` stays pure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Move {
-    /// Fuse two Carbons in the bag into a Diamond here.
-    Forge,
-    /// Mine one Carbon toward the next Diamond.
-    Mine,
-    /// Nothing to do here (planet useless, or collection complete): travel on.
-    Wander,
+    Forge,  // fuse two Carbons into a Diamond
+    Mine,   // mine one Carbon
+    Wander, // planet useless or collection done: travel
 }
 
 pub struct SmartExplorer {
@@ -57,17 +44,16 @@ pub struct SmartExplorer {
     tx_planet: Sender<ExplorerToPlanet>,
     rx_planet: Receiver<PlanetToExplorer>,
 
-    /// Real resource objects carried by the explorer (needed to craft).
+    // Resources actually carried (needed to craft).
     basics: Vec<BasicResource>,
     complexes: Vec<ComplexResource>,
 
-    /// What the *current* planet can do, discovered on arrival.
+    // Current planet's capabilities, discovered on arrival.
     gens: HashSet<BasicResourceType>,
     combos: HashSet<ComplexResourceType>,
     caps_known: bool,
 
-    /// Travel bookkeeping: which planets we've seen, and a cursor used to keep
-    /// roaming when every neighbour has already been visited.
+    // Travel bookkeeping.
     visited: HashSet<ID>,
     travel_seq: usize,
 }
@@ -116,18 +102,16 @@ impl Explorer for SmartExplorer {
 }
 
 impl SmartExplorer {
-    // ----- the autonomous turn -----------------------------------------
+    // ----- autonomous turn ---------------------------------------------
 
-    /// The collector's turn: discover, take one step toward a Diamond (or roam),
-    /// then report the bag.
+    /// One turn: discover, decide, act, report.
     fn take_turn(&mut self) {
         use BasicResourceType::Carbon;
         use ComplexResourceType::Diamond;
 
         self.ensure_caps();
         match self.decide() {
-            // If the action fails (e.g. the planet ran out of energy) we just
-            // move on; the bag is never left in a half-built state.
+            // Action failed (e.g. no energy): move on instead of stalling.
             Move::Forge => {
                 if !self.combine(Diamond) {
                     self.travel();
@@ -143,33 +127,30 @@ impl SmartExplorer {
         self.report_bag();
     }
 
-    /// Decides the single move for this turn, based only on what the bag holds
-    /// and what the current planet can do. Pure (no I/O), so it is easy to test.
+    /// Picks this turn's move from the bag and the planet's capabilities. Pure.
     fn decide(&self) -> Move {
         use BasicResourceType::Carbon;
         use ComplexResourceType::Diamond;
 
-        // Obsession satisfied: the collection is complete. Stop producing and
-        // just roam, admiring the hoard ("museum mode").
+        // Collection complete: stop and roam.
         if self.count(ResourceType::Complex(Diamond)) >= TARGET_DIAMONDS {
             return Move::Wander;
         }
-        // Two Carbons in the bag and a planet that can fuse them: make a Diamond.
+        // Two Carbons in hand and a forge here.
         if self.combos.contains(&Diamond) && self.count(ResourceType::Basic(Carbon)) >= 2 {
             return Move::Forge;
         }
-        // Still short on Carbon and this planet can mine it: mine. Every other
-        // resource the planet offers is deliberately ignored — only Diamonds.
+        // Need Carbon and can mine it here (everything else is ignored).
         if self.gens.contains(&Carbon) && self.count(ResourceType::Basic(Carbon)) < 2 {
             return Move::Mine;
         }
-        // This planet can't advance the collection: go find one that can.
+        // Planet can't help: travel.
         Move::Wander
     }
 
     // ----- planet interactions -----------------------------------------
 
-    /// Discovers (once per planet) what the current planet can generate/combine.
+    /// Discovers, once per planet, what it can generate/combine.
     fn ensure_caps(&mut self) {
         if self.caps_known {
             return;
@@ -178,7 +159,7 @@ impl SmartExplorer {
             explorer_id: self.id,
         }) {
             Some(PlanetToExplorer::SupportedResourceResponse { resource_list }) => resource_list,
-            _ => return, // leave unknown; retry next turn
+            _ => return, // unknown: retry next turn
         };
         let combos = match self.planet_roundtrip(ExplorerToPlanet::SupportedCombinationRequest {
             explorer_id: self.id,
@@ -191,7 +172,7 @@ impl SmartExplorer {
         self.caps_known = true;
     }
 
-    /// Number of charged energy cells the planet currently has.
+    /// Charged energy cells the planet has now.
     fn available_cells(&self) -> usize {
         match self.planet_roundtrip(ExplorerToPlanet::AvailableEnergyCellRequest { explorer_id: self.id }) {
             Some(PlanetToExplorer::AvailableEnergyCellResponse { available_cells }) => available_cells as usize,
@@ -199,7 +180,7 @@ impl SmartExplorer {
         }
     }
 
-    /// Asks the planet to generate a basic resource, storing it on success.
+    /// Generate a basic resource, keeping it on success.
     fn generate(&mut self, resource: BasicResourceType) -> bool {
         match self.planet_roundtrip(ExplorerToPlanet::GenerateResourceRequest {
             explorer_id: self.id,
@@ -213,10 +194,8 @@ impl SmartExplorer {
         }
     }
 
-    /// Asks the planet to combine bag resources into `target`, storing the result.
-    ///
-    /// Checks for energy first: a planet with no charged cell silently drops the
-    /// request, which would consume the ingredients without giving them back.
+    /// Combine bag resources into `target`, keeping the result. Bails if there's
+    /// no charged cell — a dead planet drops the request and eats the ingredients.
     fn combine(&mut self, target: ComplexResourceType) -> bool {
         if self.available_cells() == 0 {
             return false;
@@ -241,16 +220,14 @@ impl SmartExplorer {
         }
     }
 
-    /// Pulls the typed ingredients for `target` out of the bag and builds the
-    /// combination request. Returns `None` (leaving the bag untouched) if the
-    /// ingredients are not all present. Kept fully general so the orchestrator's
-    /// manual "combine" command still works for any resource.
+    /// Takes the ingredients for `target` out of the bag and builds the request.
+    /// `None` (bag untouched) if any is missing. Covers all recipes so the manual
+    /// "combine" command still works.
     fn build_request(&mut self, target: ComplexResourceType) -> Option<ComplexResourceRequest> {
         use BasicResourceType as B;
         use ComplexResourceType as C;
 
-        // Guard on availability before removing anything, so a partial failure
-        // never loses a resource.
+        // Check availability before removing anything, so a failure loses nothing.
         let [a, b] = recipe(target);
         if a == b {
             if self.count(a) < 2 {
@@ -296,8 +273,7 @@ impl SmartExplorer {
 
     // ----- travel -------------------------------------------------------
 
-    /// Asks the orchestrator for neighbours and moves to one, preferring planets
-    /// not visited yet so the explorer keeps discovering the galaxy.
+    /// Asks for neighbours and moves, preferring unvisited planets.
     fn travel(&mut self) {
         if self
             .tx_orchestrator
@@ -318,6 +294,7 @@ impl SmartExplorer {
             return;
         }
 
+        // Unvisited first; otherwise rotate through neighbours.
         let dst = neighbours
             .iter()
             .copied()
@@ -354,7 +331,7 @@ impl SmartExplorer {
         }
     }
 
-    /// Updates state after landing on a new planet.
+    /// Reset state after landing on a new planet.
     fn arrive(&mut self, planet: ID) {
         self.current_planet = planet;
         self.visited.insert(planet);
@@ -363,7 +340,7 @@ impl SmartExplorer {
         self.combos.clear();
     }
 
-    // ----- direct (manual-mode) commands -------------------------------
+    // ----- manual-mode commands ----------------------------------------
 
     fn handle(&mut self, msg: OrchestratorToExplorer) {
         match msg {
@@ -430,7 +407,7 @@ impl SmartExplorer {
         }
     }
 
-    // ----- bag & inventory helpers -------------------------------------
+    // ----- bag & inventory ---------------------------------------------
 
     fn report_bag(&self) {
         self.reply(ExplorerToOrchestrator::BagContentResponse {
@@ -474,7 +451,7 @@ impl SmartExplorer {
         }
     }
 
-    // ----- channel helpers ---------------------------------------------
+    // ----- channels ----------------------------------------------------
 
     fn planet_roundtrip(&self, msg: ExplorerToPlanet) -> Option<PlanetToExplorer> {
         self.tx_planet.send(msg).ok()?;
@@ -486,7 +463,7 @@ impl SmartExplorer {
     }
 }
 
-/// The two ingredients of a complex resource, as in the common crate's rules.
+/// Complex-resource recipes, per the common crate.
 fn recipe(c: ComplexResourceType) -> [ResourceType; 2] {
     use BasicResourceType as B;
     use ComplexResourceType as C;
@@ -503,13 +480,9 @@ fn recipe(c: ComplexResourceType) -> [ResourceType; 2] {
 
 #[cfg(test)]
 mod tests {
-    //! Unit tests for the collector's decision logic.
-    //!
-    //! These exercise [`SmartExplorer::decide`] in isolation, with no threads or
-    //! planet. Real resource objects can only be minted by a planet, so the bag
-    //! is empty here; that is enough to verify *which* move the collector picks
-    //! given a planet's capabilities. The "Forge" and "museum mode" branches need
-    //! a non-empty bag and are covered by the integration tests.
+    // Test the decision logic in isolation. The bag can't be filled here (only a
+    // planet mints resources), so these cover the mining/wander branches; the
+    // forge and museum-mode branches are covered by the integration tests.
 
     use super::*;
     use crossbeam_channel::unbounded;
@@ -517,7 +490,6 @@ mod tests {
     use BasicResourceType::{Carbon, Hydrogen, Oxygen};
     use ComplexResourceType::{Diamond, Water};
 
-    /// Builds a collector with known capabilities and an empty bag.
     fn explorer_with(gens: &[BasicResourceType], combos: &[ComplexResourceType]) -> SmartExplorer {
         let (_o2e_tx, o2e_rx) = unbounded();
         let (e2o_tx, _e2o_rx) = unbounded();
@@ -532,21 +504,18 @@ mod tests {
 
     #[test]
     fn mines_carbon_on_a_planet_that_can_forge_diamonds() {
-        // Empty bag, planet mines Carbon and forges Diamonds: first step is to mine.
         let e = explorer_with(&[Carbon], &[Diamond]);
         assert_eq!(e.decide(), Move::Mine);
     }
 
     #[test]
     fn mines_carbon_even_where_it_cannot_forge() {
-        // No forge here, but Carbon is the only thing it wants — mine and carry on.
         let e = explorer_with(&[Carbon], &[]);
         assert_eq!(e.decide(), Move::Mine);
     }
 
     #[test]
     fn ignores_every_resource_that_is_not_carbon() {
-        // The planet only offers Water and its gases — useless to a Diamond fiend.
         let e = explorer_with(&[Hydrogen, Oxygen], &[Water]);
         assert_eq!(e.decide(), Move::Wander);
     }
