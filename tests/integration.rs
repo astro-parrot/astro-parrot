@@ -234,7 +234,7 @@ fn explorer_autonomously_travels() {
 
 /// Verifies the explorer's *autonomous brain*: given only its turns (and sunrays
 /// to power the planet) it discovers the planet's recipes, mines Carbon and
-/// crafts a Diamond on its own — no manual Generate/Combine commands. The test
+/// crafts a Diamond on its own without manual Generate/Combine commands. The test
 /// plays the orchestrator and answers travel requests with no neighbours, so the
 /// explorer stays put.
 #[test]
